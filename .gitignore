@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tool output / generated files
+uploads/
+output/
+*.dita
+dita_converter_debug.log
+
+# Secrets
+.env
+*.pfx
+*.p12
+
+# Large source/input files (not part of deployable repo)
+Input.zip
+*.zip
+*.pdf
+
+# PyInstaller working directories
+build/_pyinstaller_work/
+dist/_pyinstaller_work/
+
+# Claude Code internal state
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Misc dev artefacts
+todita_*/
+main
+claude_code_prompt_v3.md

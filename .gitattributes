@@ -1,0 +1,21 @@
+# Git LFS — track large binary files
+# Prevents .exe files from bloating the repository history
+# Each .exe is ~150-200MB — without LFS this would make the repo unusable
+
+*.exe filter=lfs diff=lfs merge=lfs -text
+*.pfx filter=lfs diff=lfs merge=lfs -text
+
+# Standard line ending normalisation for text files
+*.py   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.spec text eol=lf
+
+# Treat binaries as binary (no line-ending conversion)
+*.docx binary
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.ico  binary

@@ -1,0 +1,185 @@
+# =============================================================================
+# DITA Converter Tool — Mapping Rules
+# Style Reference: Gilbarco Technical Manuals
+# DITA Version: 2.0
+# Source Analysis: Passport V24.04 (42 docs, 64 elements, 1559 instances)
+# Updated: S-11d 2026-03-30
+# =============================================================================
+
+topic_type: concept
+topic_type_signals:
+  task:
+    - "proceed as follows"
+    - "to configure"
+    - "to install"
+    - "to verify"
+    - "proceed with"
+    - "to activate"
+    - "to program"
+    - "to enable"
+    - "to disable"
+    - "to set up"
+  reference:
+    - "parts list"
+    - "the following table"
+    - "field name"
+    - "abbreviations and acronyms"
+    - "appendix"
+    - "product codes"
+
+heading_map:
+  h1_first: title
+  h1: section_title
+  h2: sectiondiv_title   # → nested <section> with <title> (NOT <div>)
+  h3: sectiondiv_title   # → nested <section> with <title> (NOT <div>)
+
+paragraph_map:
+  default: p
+
+list_map:
+  bullet: ul
+  numbered: ol
+  numbered_in_task: step
+
+step_substep_map:
+  sub_bullets_under_step: info_ul
+  sub_bullets_element: ul
+
+# Task structure sections — recognised by heading text patterns
+task_section_map:
+  prereq:
+    - "Before You Begin"
+    - "Prerequisites"
+    - "Requirements"
+    - "before configuring"
+  context:
+    - "Overview"
+    - "Background"
+    - "About this task"
+  postreq:
+    - "After Completing"
+    - "Next Steps"
+    - "After this task"
+  steps_unordered:
+    - "Note:"
+    - "ensure the following"
+
+table_map:
+  default: table
+  structure:
+    thead: true
+    multi_column: true
+    colspec_naming: "col{n}"
+    # frame: preserve source value (topbot=2pt rules, all=full borders)
+    # Gilbarco ROW_SHOW tables use topbot (header 2pt, rows 0.5pt, no verticals)
+    frame_default: topbot
+    frame_override: all      # used when vertical lines detected
+    rowsep: 1
+    colsep: 0                # default no column separators (ROW_SHOW style)
+  # colwidth: preserved from source when detected (e.g. 0.60*, 323.57pt)
+  colwidth_preserve: true
+  # dl is not used — all tables render as <table> regardless of content
+
+note_map:
+  - pattern: "IMPORTANT INFORMATION"
+    element: hazardstatement
+    type: notice
+    match: exact_block_header
+  - pattern: "^WARNING"
+    element: hazardstatement
+    type: warning
+    match: block_header
+  - pattern: "^CAUTION"
+    element: hazardstatement
+    type: caution
+    match: block_header
+  - pattern: "^DANGER"
+    element: hazardstatement
+    type: danger
+    match: block_header
+  - pattern: "^Note[s]?:"
+    element: note
+    type: note
+    match: inline_prefix
+
+figure_map:
+  pattern: "^Figure \\d+[:\\.]"
+  element: fig
+  title_element: title
+  image_placeholder: "[IMAGE — {caption}]"
+
+inline_map:
+  bold: b
+  italic: i
+  monospace: codeph
+  superscript: sup
+  # Trademark superscripts handled separately via __TM__ sentinel
+  tm_symbols:
+    "®": reg
+    "™": tm
+    "℠": service
+
+ui_path_pattern: ".+\\s*>\\s*.+"
+ui_path_element: menucascade
+ui_path_child: uicontrol
+# Standalone uicontrol (not in a path) — single UI label
+uicontrol_standalone: true
+
+xref_map:
+  element: xref
+  scope_default: local
+  format_default: dita
+  # When href contains # it is an anchor reference; without # it is a topic ref
+  anchor_pattern: "#"
+
+codeblock_signals:
+  - "telnet "
+  - "C:\\>"
+  - "$ "
+  - "http://"
+  - "https://"
+
+drop_patterns:
+  - pattern: "^Page \\d+"
+    reason: pagination
+  - pattern: "MDE-\\w+ .+ \\d{4}$"
+    reason: pagination
+  - pattern: "^© \\d{4}"
+    reason: boilerplate
+  - pattern: "^Table of Contents"
+    reason: auto_generated
+  - pattern: "^Related Documents"
+    reason: deferred_to_v2
+
+# Frequency reference from Passport V24.04 analysis (1559 instances, 42 docs)
+# Used to prioritise validation and review effort
+element_frequency:
+  p: 480           # 30.8% — highest volume, most critical
+  entry: 342       # 21.9%
+  row: 166         # 10.6%
+  title: 58        # 3.7%
+  b: 55            # 3.5%
+  li: 41           # 2.6%
+  step: 27         # 1.7%
+  cmd: 27          # 1.7%
+  colspec: 21      # 1.3%
+  uicontrol: 17    # 1.1%
+  image: 15        # 1.0%
+  ul: 14           # 0.9%
+  fig: 14          # 0.9%
+  note: 12         # 0.8%
+  prereq: 6        # 0.4%
+  xref: 5          # 0.3%
+  tm: 2            # 0.1%
+  hazardstatement: 1
+
+# Fallback: unmapped blocks are silently dropped — not emitted as stray <p>.
+# Writers do not use fallback/include syntax; unknown elements are discarded.
+fallback_element: drop
+fallback_note: "Silently dropped — not a writer-facing element"
+
+dita_version: "2.0"
+schema_profile: "gilbarco_manuals"
+source_analysis: "Passport V24.04 — 42 docs, 64 elements, 1559 instances"
+created: "2026-03-14"
+updated: "2026-03-30"
