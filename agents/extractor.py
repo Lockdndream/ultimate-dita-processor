@@ -649,7 +649,7 @@ def _attach_pdf_images(
                     _bg   = _Image.new("RGB", _img.size, (255, 255, 255))
                     _diff = _IC.difference(_img, _bg)
                     # Expand the difference so faint pixels are more detectable
-                    _diff = _diff.point(lambda p: 255 if p > 8 else 0)
+                    _diff = _diff.point(lambda p: 255 if p > 30 else 0)
                     _bbox = _diff.getbbox()
                     if _bbox:
                         _pad = 6

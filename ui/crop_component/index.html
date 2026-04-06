@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: transparent; overflow: hidden; }
+  canvas { display: block; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+
+const canvas = document.getElementById("c");
+const ctx    = canvas.getContext("2d");
+
+let img          = null;
+let imgW         = 0, imgH = 0;
+let scale        = 1;
+let crop         = { top: 0, bottom: 0, left: 0, right: 0 };
+let dragging     = null;
+let pendingValue = null;   // sent to Streamlit but not yet ack'd
+const HANDLE_R   = 9;
+
+// ── Streamlit messaging ───────────────────────────────────────────────────────
+// isStreamlitMessage: true is REQUIRED — Streamlit's frontend JS ignores
+// any iframe postMessage that doesn't carry this flag.
+
+function post(type, extra) {
+  window.parent.postMessage(
+    Object.assign({ isStreamlitMessage: true, type: type }, extra || {}),
+    "*"
+  );
+}
+
+const sendReady  = ()  => post("streamlit:componentReady", { apiVersion: 1 });
+const setHeight  = (h) => post("streamlit:setFrameHeight", { height: h });
+const sendValue  = (v) => {
+  pendingValue = { ...v };
+  post("streamlit:setComponentValue", { value: v, dataType: "json" });
+};
+
+window.addEventListener("message", function (e) {
+  const d = e.data;
+  if (!d || d.type !== "streamlit:render") return;
+  onRender(d.args || {});
+});
+
+// ── Render ────────────────────────────────────────────────────────────────────
+
+function onRender(args) {
+  const argCrop = {
+    top:    Math.round(args.top    || 0),
+    bottom: Math.round(args.bottom || 0),
+    left:   Math.round(args.left   || 0),
+    right:  Math.round(args.right  || 0),
+  };
+
+  if (pendingValue !== null) {
+    // Check if Python has caught up with what we sent
+    if (argCrop.top    === pendingValue.top    &&
+        argCrop.bottom === pendingValue.bottom &&
+        argCrop.left   === pendingValue.left   &&
+        argCrop.right  === pendingValue.right) {
+      pendingValue = null;
+    }
+    // Don't overwrite crop with stale args while pending
+  } else if (!dragging) {
+    crop = argCrop;
+  }
+
+  const b64 = args.img_b64 || "";
+  if (!b64) return;
+  const dataUrl = "data:image/png;base64," + b64;
+
+  if (!img || img._src !== dataUrl) {
+    const ni  = new Image();
+    ni._src   = dataUrl;
+    ni.onload = () => { img = ni; imgW = ni.naturalWidth; imgH = ni.naturalHeight; resize(); };
+    ni.src    = dataUrl;
+  } else {
+    draw();
+  }
+}
+
+// ── Sizing ────────────────────────────────────────────────────────────────────
+
+function resize() {
+  const w   = Math.max(1, window.innerWidth - 4);
+  scale     = Math.min(1, w / imgW);
+  canvas.width  = Math.round(imgW * scale);
+  canvas.height = Math.round(imgH * scale);
+  setHeight(canvas.height + 6);
+  draw();
+}
+
+window.addEventListener("resize", () => { if (img) resize(); });
+
+// ── Drawing ───────────────────────────────────────────────────────────────────
+
+function rect() {
+  return {
+    x:  crop.left            * scale,
+    y:  crop.top             * scale,
+    x2: (imgW - crop.right)  * scale,
+    y2: (imgH - crop.bottom) * scale,
+  };
+}
+
+function handles(r) {
+  const mx = (r.x + r.x2) / 2, my = (r.y + r.y2) / 2;
+  return [
+    { edge: "top",    cx: mx,   cy: r.y  },
+    { edge: "bottom", cx: mx,   cy: r.y2 },
+    { edge: "left",   cx: r.x,  cy: my   },
+    { edge: "right",  cx: r.x2, cy: my   },
+  ];
+}
+
+function draw() {
+  if (!img) return;
+  const cw = canvas.width, ch = canvas.height;
+  ctx.clearRect(0, 0, cw, ch);
+  ctx.drawImage(img, 0, 0, cw, ch);
+
+  const r = rect();
+
+  // Dark overlay on excluded regions
+  ctx.fillStyle = "rgba(0,0,0,0.52)";
+  ctx.fillRect(0,    0,    cw,        r.y        );
+  ctx.fillRect(0,    r.y2, cw,        ch  - r.y2 );
+  ctx.fillRect(0,    r.y,  r.x,       r.y2 - r.y );
+  ctx.fillRect(r.x2, r.y,  cw - r.x2, r.y2 - r.y );
+
+  // Yellow crop border
+  ctx.strokeStyle = "rgba(255,210,0,1)";
+  ctx.lineWidth   = 3;
+  ctx.strokeRect(r.x, r.y, r.x2 - r.x, r.y2 - r.y);
+
+  // Edge handles
+  for (const h of handles(r)) {
+    ctx.beginPath();
+    ctx.arc(h.cx, h.cy, HANDLE_R, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,210,0,1)";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(h.cx, h.cy, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fill();
+  }
+}
+
+// ── Hit-test ──────────────────────────────────────────────────────────────────
+
+function hitEdge(mx, my) {
+  const r = rect();
+  for (const h of handles(r)) {
+    if (Math.hypot(mx - h.cx, my - h.cy) <= HANDLE_R + 6) return h.edge;
+  }
+  return null;
+}
+
+// ── Drag ─────────────────────────────────────────────────────────────────────
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function applyDrag(mx, my) {
+  const dx = (mx - dragging.startPos.x) / scale;
+  const dy = (my - dragging.startPos.y) / scale;
+  const sc = dragging.startCrop;
+  const nc = { ...sc };
+  if (dragging.edge === "top")    nc.top    = clamp(sc.top    + dy, 0, imgH - sc.bottom - 1);
+  if (dragging.edge === "bottom") nc.bottom = clamp(sc.bottom - dy, 0, imgH - sc.top    - 1);
+  if (dragging.edge === "left")   nc.left   = clamp(sc.left   + dx, 0, imgW - sc.right  - 1);
+  if (dragging.edge === "right")  nc.right  = clamp(sc.right  - dx, 0, imgW - sc.left   - 1);
+  crop = { top: Math.round(nc.top), bottom: Math.round(nc.bottom),
+           left: Math.round(nc.left), right: Math.round(nc.right) };
+  draw();
+}
+
+function endDrag() {
+  dragging = null;
+  canvas.style.cursor = "default";
+  sendValue({ ...crop });
+}
+
+// ── Mouse ─────────────────────────────────────────────────────────────────────
+
+function cpos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+canvas.addEventListener("mousedown", e => {
+  const { x, y } = cpos(e);
+  const edge = hitEdge(x, y);
+  if (!edge) return;
+  dragging = { edge, startPos: { x, y }, startCrop: { ...crop } };
+  e.preventDefault();
+});
+
+canvas.addEventListener("mousemove", e => {
+  const { x, y } = cpos(e);
+  if (!dragging) {
+    const edge = hitEdge(x, y);
+    canvas.style.cursor = !edge ? "default"
+      : (edge === "top" || edge === "bottom") ? "ns-resize" : "ew-resize";
+    return;
+  }
+  applyDrag(x, y);
+});
+
+canvas.addEventListener("mouseup",    () => { if (dragging) endDrag(); });
+canvas.addEventListener("mouseleave", () => { if (dragging) endDrag(); });
+
+// ── Touch ─────────────────────────────────────────────────────────────────────
+
+function tpos(e) {
+  const r = canvas.getBoundingClientRect(), t = e.changedTouches[0];
+  return { x: t.clientX - r.left, y: t.clientY - r.top };
+}
+
+canvas.addEventListener("touchstart",  e => {
+  const { x, y } = tpos(e);
+  const edge = hitEdge(x, y);
+  if (!edge) return;
+  dragging = { edge, startPos: { x, y }, startCrop: { ...crop } };
+  e.preventDefault();
+}, { passive: false });
+
+canvas.addEventListener("touchmove", e => {
+  if (!dragging) return;
+  applyDrag(...Object.values(tpos(e)));
+  e.preventDefault();
+}, { passive: false });
+
+canvas.addEventListener("touchend",    () => { if (dragging) endDrag(); });
+canvas.addEventListener("touchcancel", () => { if (dragging) endDrag(); });
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+sendReady();
+</script>
+</body>
+</html>
