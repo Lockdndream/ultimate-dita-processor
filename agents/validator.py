@@ -62,23 +62,41 @@ class Validator:
 
         # ---- 2. Root element check ----
         local = etree.QName(root.tag).localname if root.tag.startswith("{") else root.tag
-        if local not in ("concept", "task", "reference", "topic", "bookmap", "map"):
+        _VALID_ROOTS = {"concept", "task", "reference", "topic", "bookmap", "map", "dita"}
+        if local not in _VALID_ROOTS:
             result.errors.append(
                 f"Root element <{local}> is not a recognised DITA 2.0 topic or map type."
             )
 
         ns = DITA2_NS
 
+        # For ditabase (<dita>) roots the title and topic-type live on the first
+        # typed child element, not on <dita> itself.  Find the effective node so
+        # title checks and stats work correctly for both root shapes.
+        _TOPIC_TYPES = {"concept", "task", "reference", "topic"}
+        if local == "dita":
+            _effective = root
+            _eff_local = local
+            for _child in root:
+                _cl = etree.QName(_child.tag).localname if _child.tag.startswith("{") else _child.tag
+                if _cl in _TOPIC_TYPES:
+                    _effective = _child
+                    _eff_local = _cl
+                    break
+        else:
+            _effective = root
+            _eff_local = local
+
         # ---- 3. Title ----
-        titles = root.findall(f"{{{ns}}}title")
+        titles = _effective.findall(f"{{{ns}}}title")
         if not titles:
             result.errors.append("Missing <title> element at topic root.")
         elif not (titles[0].text or "").strip():
             result.warnings.append("Topic <title> is empty.")
 
-        # ---- 4. Topic id ----
-        if not root.get("id"):
-            result.warnings.append("Topic root element has no @id attribute.")
+        # ---- 4. Topic @id ----
+        # Intentionally omitted from generated output (D-011: server assigns on
+        # import).  Do not flag missing @id as an error or warning.
 
         # ---- 5. Structural checks ----
         # Empty sections
@@ -107,7 +125,7 @@ class Validator:
 
         # ---- 6. Content stats ----
         stats: dict = {}
-        stats["topic_type"] = local
+        stats["topic_type"] = _eff_local
         stats["topic_id"] = root.get("id", "")
         stats["title"] = (titles[0].text or "").strip() if titles else ""
         stats["sections"] = len(root.findall(f".//{{{ns}}}section"))
