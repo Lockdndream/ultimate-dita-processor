@@ -231,6 +231,142 @@ if "image_crops" not in st.session_state:
     st.session_state.image_crops = {}
 
 # ---------------------------------------------------------------------------
+# Crop dialog — modal overlay, opened when user clicks a thumbnail's Crop button.
+# @st.dialog reruns are scoped to the dialog: no page-wide overlay during drag.
+# st.rerun() inside closes the dialog and does a full app rerun (Apply/Reset only).
+# ---------------------------------------------------------------------------
+
+@st.dialog("✏️ Crop image", width="large")
+def _crop_dialog(fig_idx: int, caption: str, raw_bytes: bytes,
+                 orig_w: int, orig_h: int) -> None:
+    import base64 as _b64
+
+    st.caption(f"{orig_w}×{orig_h}px  ·  {caption}")
+
+    _dc = st.session_state.image_crops.get(fig_idx, {})
+    _ds = st.session_state.get(f"crop_{fig_idx}_top",    _dc.get("top",    0))
+    _db = st.session_state.get(f"crop_{fig_idx}_bottom", _dc.get("bottom", 0))
+    _dl = st.session_state.get(f"crop_{fig_idx}_left",   _dc.get("left",   0))
+    _dr = st.session_state.get(f"crop_{fig_idx}_right",  _dc.get("right",  0))
+
+    _dresult = _crop_widget(
+        img_b64=_b64.b64encode(raw_bytes).decode(),
+        top=_ds, bottom=_db, left=_dl, right=_dr,
+        key=f"dlg_cropper_{fig_idx}",
+        default=None,
+    )
+    if _dresult is not None:
+        _ds = int(_dresult.get("top",    _ds))
+        _db = int(_dresult.get("bottom", _db))
+        _dl = int(_dresult.get("left",   _dl))
+        _dr = int(_dresult.get("right",  _dr))
+        st.session_state[f"crop_{fig_idx}_top"]    = _ds
+        st.session_state[f"crop_{fig_idx}_bottom"] = _db
+        st.session_state[f"crop_{fig_idx}_left"]   = _dl
+        st.session_state[f"crop_{fig_idx}_right"]  = _dr
+
+    _dkw = max(0, orig_w - _dl - _dr)
+    _dkh = max(0, orig_h - _ds - _db)
+    if _dkw <= 0 or _dkh <= 0:
+        st.warning("⚠️ Crop values eliminate the image.")
+    else:
+        _dcomm = st.session_state.image_crops.get(fig_idx, {})
+        _dapp  = (
+            f"  ·  applied "
+            f"{orig_w - _dcomm.get('left',0) - _dcomm.get('right',0)}"
+            f"×{orig_h - _dcomm.get('top',0) - _dcomm.get('bottom',0)}px"
+            if any(_dcomm.get(k, 0) > 0 for k in ("top","bottom","left","right")) else ""
+        )
+        st.caption(f"Staged → {_dkw}×{_dkh}px{_dapp}")
+
+    _da, _db2 = st.columns(2)
+    with _da:
+        if st.button("✓ Apply crop", type="primary",
+                     use_container_width=True, key=f"dlg_apply_{fig_idx}"):
+            st.session_state.image_crops[fig_idx] = {
+                "top": _ds, "bottom": _db, "left": _dl, "right": _dr,
+            }
+            st.rerun()
+    with _db2:
+        if st.button("↺ Reset", use_container_width=True,
+                     key=f"dlg_reset_{fig_idx}"):
+            for _e in ("top", "bottom", "left", "right"):
+                st.session_state.pop(f"crop_{fig_idx}_{_e}", None)
+            st.session_state.image_crops[fig_idx] = {
+                "top": 0, "bottom": 0, "left": 0, "right": 0,
+            }
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Images tab fragment — thumbnail grid only; crop opens via _crop_dialog modal.
+# @st.fragment scopes non-dialog reruns to this function alone.
+# ---------------------------------------------------------------------------
+
+@st.fragment
+def _images_tab(res: dict) -> None:
+    import io as _io
+    import base64 as _b64
+    from PIL import Image as _pil_img
+
+    if not res.get("extract_images") or not any(
+        b.get("type") == "figure" and b.get("metadata", {}).get("image_bytes_raw")
+        for b in res["blocks"]
+    ):
+        st.info("No images extracted. Enable 'Extract images' and convert again.")
+        return
+
+    _all_figs = [
+        b for b in res["blocks"]
+        if b.get("type") == "figure"
+        and b.get("metadata", {}).get("image_bytes_raw")
+    ]
+    st.caption(f"{len(_all_figs)} image(s) extracted  ·  click ✏️ Crop to edit")
+
+    _COLS = 4
+    for _rs in range(0, len(_all_figs), _COLS):
+        _tcols = st.columns(_COLS)
+        for _ci, _fig in enumerate(_all_figs[_rs : _rs + _COLS]):
+            _fi     = _rs + _ci
+            _meta   = _fig.get("metadata", {})
+            _raw    = _meta.get("image_bytes_raw", _meta.get("image_bytes"))
+            _cap    = _fig.get("text", "")
+            _cshort = (_cap[:28] + "…") if len(_cap) > 28 else _cap
+
+            _crops     = st.session_state.image_crops.get(_fi, {})
+            _is_cropped = any(_crops.get(k, 0) > 0 for k in ("top","bottom","left","right"))
+            _tsrc = _apply_manual_crop(
+                _raw,
+                _crops.get("top", 0), _crops.get("bottom", 0),
+                _crops.get("left", 0), _crops.get("right", 0),
+            ) if _is_cropped else _raw
+
+            try:
+                _pt    = _pil_img.open(_io.BytesIO(_tsrc))
+                _ratio = 160 / max(_pt.width, 1)
+                _pt    = _pt.resize((160, int(_pt.height * _ratio)), _pil_img.LANCZOS)
+                _tb    = _io.BytesIO()
+                _pt.save(_tb, format="PNG")
+                _tw, _th = _pt.size
+                _tb64  = _b64.b64encode(_tb.getvalue()).decode()
+                _ow, _oh = _pil_img.open(_io.BytesIO(_raw)).size
+            except Exception:
+                _tw, _th, _tb64, _ow, _oh = 0, 0, "", 1, 1
+
+            with _tcols[_ci]:
+                if _tb64:
+                    st.markdown(
+                        f'<img src="data:image/png;base64,{_tb64}" width="160" '
+                        f'style="border-radius:4px;display:block;margin-bottom:4px;">',
+                        unsafe_allow_html=True,
+                    )
+                st.caption(f"{_cshort}\n{_tw}×{_th}px" + (" ✂️" if _is_cropped else ""))
+                if st.button("✏️ Crop", key=f"crop_btn_{_fi}",
+                             use_container_width=True):
+                    _crop_dialog(_fi, _cap, _raw, _ow, _oh)
+
+
+# ---------------------------------------------------------------------------
 # Layout: left column (options) | right column (output)
 # ---------------------------------------------------------------------------
 
@@ -723,158 +859,7 @@ with right:
 
         # ── TAB 5: Images ────────────────────────────────────────────────────
         with tabs[4]:
-            import io as _io
-            from PIL import Image as _pil_img
-
-            _extract_images_flag = res.get("extract_images", False)
-            _all_fig_blocks = [
-                b for b in res["blocks"]
-                if b.get("type") == "figure"
-                and b.get("metadata", {}).get("image_bytes_raw")
-            ]
-
-            if not _extract_images_flag or not _all_fig_blocks:
-                st.info("No images extracted. Enable 'Extract images' and convert again.")
-            else:
-                import base64 as _b64
-                n_imgs_tab = len(_all_fig_blocks)
-                st.caption(f"{n_imgs_tab} image(s) extracted")
-
-                # ── Thumbnail grid (4 per row) ────────────────────────────
-                # Plain HTML <img> — no Streamlit expand icon.
-                # Thumbnail shows committed-crop result; ✂️ badge if cropped.
-                _COLS = 4
-                for _row_start in range(0, n_imgs_tab, _COLS):
-                    _row_figs = _all_fig_blocks[_row_start : _row_start + _COLS]
-                    _thumb_cols = st.columns(_COLS)
-                    for _col_idx, _fig in enumerate(_row_figs):
-                        _fig_idx   = _row_start + _col_idx
-                        _meta      = _fig.get("metadata", {})
-                        _raw       = _meta.get("image_bytes_raw", _meta.get("image_bytes"))
-                        _caption   = _fig.get("text", "")
-                        _cap_short = (_caption[:28] + "…") if len(_caption) > 28 else _caption
-
-                        _crops = st.session_state.image_crops.get(_fig_idx, {})
-                        _is_cropped = any(_crops.get(k, 0) > 0 for k in ("top","bottom","left","right"))
-
-                        _thumb_src = _apply_manual_crop(
-                            _raw,
-                            _crops.get("top", 0), _crops.get("bottom", 0),
-                            _crops.get("left", 0), _crops.get("right", 0),
-                        ) if _is_cropped else _raw
-
-                        try:
-                            _pil_t   = _pil_img.open(_io.BytesIO(_thumb_src))
-                            _t_ratio = 160 / max(_pil_t.width, 1)
-                            _pil_t   = _pil_t.resize(
-                                (160, int(_pil_t.height * _t_ratio)), _pil_img.LANCZOS
-                            )
-                            _t_buf   = _io.BytesIO()
-                            _pil_t.save(_t_buf, format="PNG")
-                            _tw, _th = _pil_t.size
-                            _t_b64   = _b64.b64encode(_t_buf.getvalue()).decode()
-                        except Exception:
-                            _tw, _th, _t_b64 = 0, 0, ""
-
-                        with _thumb_cols[_col_idx]:
-                            if _t_b64:
-                                st.markdown(
-                                    f'<img src="data:image/png;base64,{_t_b64}" '
-                                    f'width="160" style="border-radius:4px;display:block;">',
-                                    unsafe_allow_html=True,
-                                )
-                            st.caption(
-                                f"{_cap_short}\n{_tw}×{_th}px"
-                                + (" ✂️" if _is_cropped else "")
-                            )
-
-                # ── Per-image expander crop editors ───────────────────────
-                # Canvas component: all dragging is pure JS — zero Python
-                # involvement during drag.  sendValue() fires only on mouseup.
-                st.markdown("#### ✏️ Crop editors")
-                for _fig_idx, _fig in enumerate(_all_fig_blocks):
-                    _meta    = _fig.get("metadata", {})
-                    _raw     = _meta.get("image_bytes_raw", _meta.get("image_bytes"))
-                    _caption = _fig.get("text", "")
-                    _cap_short = (_caption[:45] + "…") if len(_caption) > 45 else _caption
-
-                    _crops = st.session_state.image_crops.get(_fig_idx, {})
-                    _is_cropped = any(_crops.get(k, 0) > 0 for k in ("top","bottom","left","right"))
-                    _exp_label = f"{'✂️ ' if _is_cropped else ''}✏️ {_cap_short}"
-
-                    try:
-                        _orig_img = _pil_img.open(_io.BytesIO(_raw))
-                        _orig_w, _orig_h = _orig_img.size
-                    except Exception:
-                        _orig_w, _orig_h = 1, 1
-
-                    # Staging values (last drag position or committed crop)
-                    _s_top = st.session_state.get(f"crop_{_fig_idx}_top",
-                             _crops.get("top", 0))
-                    _s_bot = st.session_state.get(f"crop_{_fig_idx}_bottom",
-                             _crops.get("bottom", 0))
-                    _s_l   = st.session_state.get(f"crop_{_fig_idx}_left",
-                             _crops.get("left", 0))
-                    _s_r   = st.session_state.get(f"crop_{_fig_idx}_right",
-                             _crops.get("right", 0))
-
-                    with st.expander(_exp_label, expanded=False):
-                        _raw_b64 = _b64.b64encode(_raw).decode()
-                        _result  = _crop_widget(
-                            img_b64=_raw_b64,
-                            top=_s_top, bottom=_s_bot,
-                            left=_s_l,  right=_s_r,
-                            key=f"cropper_{_fig_idx}",
-                            default=None,
-                        )
-
-                        # Mouseup sends new values — store as staging
-                        if _result is not None:
-                            _s_top = int(_result.get("top",    _s_top))
-                            _s_bot = int(_result.get("bottom", _s_bot))
-                            _s_l   = int(_result.get("left",   _s_l))
-                            _s_r   = int(_result.get("right",  _s_r))
-                            st.session_state[f"crop_{_fig_idx}_top"]    = _s_top
-                            st.session_state[f"crop_{_fig_idx}_bottom"] = _s_bot
-                            st.session_state[f"crop_{_fig_idx}_left"]   = _s_l
-                            st.session_state[f"crop_{_fig_idx}_right"]  = _s_r
-
-                        _keep_w = max(0, _orig_w - _s_l - _s_r)
-                        _keep_h = max(0, _orig_h - _s_top - _s_bot)
-                        if _keep_w <= 0 or _keep_h <= 0:
-                            st.warning("⚠️ Crop boundary eliminates the image.")
-                        else:
-                            _comm = st.session_state.image_crops.get(_fig_idx, {})
-                            _app  = (
-                                f"  ·  applied "
-                                f"{_orig_w - _comm.get('left',0) - _comm.get('right',0)}"
-                                f"×{_orig_h - _comm.get('top',0) - _comm.get('bottom',0)}px"
-                                if _is_cropped else ""
-                            )
-                            st.caption(
-                                f"Original {_orig_w}×{_orig_h}px  ·  "
-                                f"staged → {_keep_w}×{_keep_h}px{_app}"
-                            )
-
-                        _btn_l, _btn_r = st.columns(2)
-                        with _btn_l:
-                            if st.button("✓ Apply crop", type="primary",
-                                         use_container_width=True,
-                                         key=f"apply_btn_{_fig_idx}"):
-                                st.session_state.image_crops[_fig_idx] = {
-                                    "top": _s_top, "bottom": _s_bot,
-                                    "left": _s_l,  "right":  _s_r,
-                                }
-                                st.rerun()
-                        with _btn_r:
-                            if st.button("↺ Reset", use_container_width=True,
-                                         key=f"reset_btn_{_fig_idx}"):
-                                for _edge in ("top", "bottom", "left", "right"):
-                                    st.session_state.pop(f"crop_{_fig_idx}_{_edge}", None)
-                                st.session_state.image_crops[_fig_idx] = {
-                                    "top": 0, "bottom": 0, "left": 0, "right": 0,
-                                }
-                                st.rerun()
+            _images_tab(res)
 
         # ── TAB 6: Debug Log ─────────────────────────────────────────────────
         with tabs[5]:
