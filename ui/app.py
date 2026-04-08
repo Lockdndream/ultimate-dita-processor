@@ -387,7 +387,7 @@ with left:
 
     st.markdown(
         '<div style="font-size:10px;color:#c8ff00;letter-spacing:0.12em;'
-        'margin-bottom:8px;font-family:monospace;">v1.5.3 · span-probe</div>',
+        'margin-bottom:8px;font-family:monospace;">v1.5.4 · geometry-autonumber</div>',
         unsafe_allow_html=True,
     )
 

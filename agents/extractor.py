@@ -700,17 +700,14 @@ def _extract_autonumbers(
     log=None,
 ) -> dict[tuple[int, float], int]:
     """
-    Use PyMuPDF to find FrameMaker autonumber frames.
+    Use PyMuPDF to find FrameMaker autonumber frames by geometry only.
 
-    FrameMaker renders each step number as an isolated span in a
-    separate anchored text frame. These appear as single-digit (or
-    two-digit) text spans with:
-      - width < 25pt
-      - text matches r'^\\d{1,2}$'
-      - positioned to the LEFT of the step body text on the same line
+    FrameMaker renders each step number as a very narrow isolated span
+    positioned to the left of the step body text. Detection uses only
+    bounding-box dimensions — no text decoding required.
 
     Returns: dict mapping (page_idx, y_baseline) → step_number
-    where y_baseline is rounded to 2pt to allow for minor Y jitter.
+    where step numbers are assigned sequentially per page/section.
     """
     def _log(msg):
         if log is not None:
@@ -741,17 +738,46 @@ def _extract_autonumbers(
                 continue
             for line in block.get("lines", []):
                 for span in line.get("spans", []):
-                    txt = span.get("text", "").strip()
-                    bbox = span.get("bbox", (0, 0, 0, 0))
-                    span_w = bbox[2] - bbox[0]
-                    y_mid  = round((bbox[1] + bbox[3]) / 2, 0)
+                    bbox    = span.get("bbox", (0, 0, 0, 0))
+                    span_w  = bbox[2] - bbox[0]
+                    span_x0 = bbox[0]
+                    y_mid   = round((bbox[1] + bbox[3]) / 2, 0)
 
-                    if pg_idx in (3, 4, 5):
-                        _log(f"[SPAN] pg={pg_idx} y={y_mid:.1f} "
-                             f"x0={bbox[0]:.1f} w={span_w:.1f} "
-                             f"txt={txt[:40]!r}")
+                    # Autonumber frame signature:
+                    # - Very narrow box (single digit width)
+                    # - Positioned LEFT of body text baseline
+                    # - Not a rule/line (height must be > 3pt)
+                    span_h = bbox[3] - bbox[1]
+                    if (
+                        2.0 <= span_w <= 12.0     # single digit width
+                        and span_h > 3.0          # not a rule line
+                        and span_x0 < 160.0       # left of typical body text
+                    ):
+                        key = (pg_idx, y_mid)
+                        result[key] = -1   # placeholder, sequence assigned below
+                        _log(f"[AUTONUM] candidate pg={pg_idx} y={y_mid:.1f} "
+                             f"x0={span_x0:.1f} w={span_w:.1f}")
 
     doc.close()
+
+    # Assign sequential step numbers by geometric order.
+    # Counter resets on new page or large Y gap (new section).
+    sorted_keys = sorted(result.keys(), key=lambda k: (k[0], k[1]))
+    step_num = 0
+    prev_pg  = -1
+    prev_y   = -9999.0
+
+    for key in sorted_keys:
+        pg_idx_k, y_mid_k = key
+        if pg_idx_k != prev_pg or (y_mid_k - prev_y) > 200.0:
+            step_num = 0
+        step_num += 1
+        result[key] = step_num
+        prev_pg = pg_idx_k
+        prev_y  = y_mid_k
+        _log(f"[AUTONUM] assigned pg={pg_idx_k} y={y_mid_k:.1f} "
+             f"→ step {step_num}")
+
     _log(f"[AUTONUM] total autonumbers found: {len(result)}")
     return result
 
@@ -1052,8 +1078,8 @@ def extract_pdf(
             _top  = _meta.get("_para_top")
             if _pg is None or _top is None:
                 continue
-            # Look for an autonumber within 6pt Y of this paragraph
-            for _dy in range(-6, 7):
+            # Look for an autonumber within 15pt Y of this paragraph
+            for _dy in range(-15, 16):
                 _key = (_pg, round(_top + _dy, 0))
                 if _key in _autonums:
                     _blk["type"] = "list_item"
