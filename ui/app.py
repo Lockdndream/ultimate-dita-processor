@@ -387,7 +387,7 @@ with left:
 
     st.markdown(
         '<div style="font-size:10px;color:#c8ff00;letter-spacing:0.12em;'
-        'margin-bottom:8px;font-family:monospace;">v1.5.5 · substep-support</div>',
+        'margin-bottom:8px;font-family:monospace;">v1.5.6 · dita2-nested-steps</div>',
         unsafe_allow_html=True,
     )
 

@@ -609,14 +609,17 @@ class Generator:
                 step_el = etree.SubElement(steps_el, _tag(ns, "step"))
                 cmd_el = etree.SubElement(step_el, _tag(ns, "cmd"))
                 _safe_text(cmd_el, sb.get("text", ""))
-                # Attach any pending substeps to this step
+                # DITA 2.0: sub-steps nest as <steps><step> inside parent <step>
+                # substeps/substep were removed in DITA 2.0
                 pending = substep_buffer.pop(0) if substep_buffer else []
                 if pending:
-                    subs_el = etree.SubElement(step_el, _tag(ns, "substeps"))
+                    nested_steps_el = etree.SubElement(step_el, _tag(ns, "steps"))
                     for ssb in pending:
-                        ss_el = etree.SubElement(subs_el, _tag(ns, "substep"))
-                        scmd  = etree.SubElement(ss_el, _tag(ns, "cmd"))
-                        _safe_text(scmd, ssb.get("text", ""))
+                        nested_step_el = etree.SubElement(
+                            nested_steps_el, _tag(ns, "step"))
+                        nested_cmd_el  = etree.SubElement(
+                            nested_step_el, _tag(ns, "cmd"))
+                        _safe_text(nested_cmd_el, ssb.get("text", ""))
             step_buffer = []
             substep_buffer = []
 

@@ -116,6 +116,7 @@ class Mapper:
                     # resolves this correctly at render time.
                     block["dita_element"] = "numbered_li"
                 elif list_kind == "substep":
+                    # DITA 2.0: renders as nested <steps><step> inside parent <step>
                     block["dita_element"] = "substep"
                 else:
                     block["dita_element"] = "ul_li"
