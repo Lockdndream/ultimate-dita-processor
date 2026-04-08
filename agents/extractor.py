@@ -733,6 +733,9 @@ def extract_pdf(
         # Resolve page range filter
         page_indices = _parse_page_range(page_range, total_pages)  # None = all pages
 
+        class _StepCounter: n = 0
+        step_counter_holder = _StepCounter()
+
         for page_idx, page in enumerate(pdf.pages):
 
             # ---- Page range filter (B-001) ----
@@ -892,8 +895,22 @@ def extract_pdf(
                         continue  # don't add superscript as its own word
                 lines.setdefault(top, []).append(w)
 
+            # Calculate the body text baseline x0 for this page.
+            # Most body paragraphs share a common left indent.
+            # Steps are indented further right than this baseline.
+            _page_x0s = []
+            for _wg in lines.values():
+                if _wg:
+                    _page_x0s.append(_wg[0]["x0"])
+            if _page_x0s:
+                # Use the most common x0 value as the body baseline
+                from collections import Counter as _Ctr
+                _body_x0 = _Ctr(round(_x, -1) for _x in _page_x0s).most_common(1)[0][0]
+            else:
+                _body_x0 = 0.0
+            _STEP_INDENT_THRESHOLD = 18.0  # pt — steps indented more than this
+
             prev_para = None
-            pending_step_num: int | None = None   # FrameMaker orphaned step number
             for top in sorted(lines):
                 word_group = lines[top]
                 text = " ".join(w["text"] for w in word_group).strip()
@@ -913,43 +930,9 @@ def extract_pdf(
                     dropped_count += 1
                     continue
 
-                if page_idx in (3, 4, 5):   # 0-based: pages 5-7 in MDE-5837A
-                    first_word_x = word_group[0]["x0"] if word_group else -1
-                    _log(f"[INDENT] pg={page_idx} top={top:.1f} "
-                         f"x0={first_word_x:.1f} bold={line_is_bold} "
-                         f"text={text[:60]!r}")
-
-                if any("proceed" in (b[1].get("text","").lower())
-                       for b in page_blocks) or "proceed" in text.lower():
-                    _log(f"[PROBE] pg={page_idx} top={top:.1f} "
-                         f"block_type={block_type} bold={line_is_bold} "
-                         f"text={text[:80]!r}")
-
-                # FrameMaker orphaned step number — digit alone on a line
-                # e.g. pdfplumber extracts "1" and "Remove the feet..." separately
-                if re.match(r"^\d{1,2}$", text.strip()) and block_type in ("paragraph", "heading"):
-                    pending_step_num = int(text.strip())
-                    _log(f"[STEP_NUM] orphaned digit detected: {text.strip()!r} "
-                         f"at top={top:.1f} pg={page_idx} block_type={block_type}")
-                    prev_para = None
-                    continue   # do not emit a block — wait for the text line
-
-                # If a step number is pending, attach it to this line
-                if pending_step_num is not None and block_type in ("paragraph", "heading"):
-                    meta = {"list_kind": "numbered", "num": pending_step_num}
-                    _log(f"[STEP_NUM] consumed pending={pending_step_num} "
-                         f"with text={text[:60]!r} block_type={block_type}")
-                    pending_step_num = None
-                    page_blocks.append((top, make_block("list_item", text, metadata=meta)))
-                    prev_para = None
-                    continue
-
-                # Only clear on a new heading — figures and notes can appear
-                # between a FrameMaker step number and its text line
-                if pending_step_num is not None and block_type == "heading":
-                    _log(f"[STEP_NUM] pending cleared by block_type={block_type} "
-                         f"text={text[:30]!r}")
-                    pending_step_num = None
+                # Reset step counter on each new heading
+                if block_type == "heading":
+                    step_counter_holder.n = 0
 
                 # Bullet detection
                 if text.startswith(("•", "–", "-", "▪", "◆")) or \
@@ -961,16 +944,24 @@ def extract_pdf(
                     prev_para = None
                     continue
 
-                # Numbered item detection
-                # Allow heading block_type too — FrameMaker bold numbered steps
-                # are classified as headings by font size but are list items by structure.
-                num_match = re.match(r"^(\d{1,2})[.)]\s+(.+)|^(\d{1,2})\s{1,4}(.+)", text)
-                if num_match and block_type in ("paragraph", "heading"):
-                    num  = int(num_match.group(1) or num_match.group(3) or 0)
-                    text = (num_match.group(2) or num_match.group(4) or "").strip()
-                    meta = {"list_kind": "numbered", "num": num}
-                    _log(f"[STEP_NUM] same-line match: num={num!r} "
-                         f"text={text[:60]!r} block_type={block_type}")
+                # Indent-based step detection:
+                # FrameMaker auto-numbered steps are indented further right
+                # than body paragraphs. No phrase trigger needed.
+                first_x0 = word_group[0]["x0"] if word_group else 0.0
+                is_step_indent = (
+                    first_x0 > _body_x0 + _STEP_INDENT_THRESHOLD
+                    and block_type == "paragraph"
+                    and not line_is_bold
+                    and not re.match(r"^Figure\s+\d", text, re.IGNORECASE)
+                    and not re.match(r"^Notes?:", text, re.IGNORECASE)
+                )
+                if is_step_indent:
+                    step_counter = step_counter_holder.n + 1
+                    step_counter_holder.n = step_counter
+                    meta = {"list_kind": "numbered", "num": step_counter}
+                    _log(f"[STEP_INDENT] pg={page_idx} x0={first_x0:.1f} "
+                         f"baseline={_body_x0:.1f} step={step_counter} "
+                         f"text={text[:50]!r}")
                     page_blocks.append((top, make_block("list_item", text, metadata=meta)))
                     prev_para = None
                     continue
