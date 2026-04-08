@@ -694,6 +694,74 @@ def _cleanup_fig_meta(blocks: list[dict]) -> None:
         m.pop("_fig_top",  None)
 
 
+def _extract_autonumbers(
+    file_bytes: bytes,
+    page_indices: set | None,
+    log=None,
+) -> dict[tuple[int, float], int]:
+    """
+    Use PyMuPDF to find FrameMaker autonumber frames.
+
+    FrameMaker renders each step number as an isolated span in a
+    separate anchored text frame. These appear as single-digit (or
+    two-digit) text spans with:
+      - width < 25pt
+      - text matches r'^\\d{1,2}$'
+      - positioned to the LEFT of the step body text on the same line
+
+    Returns: dict mapping (page_idx, y_baseline) → step_number
+    where y_baseline is rounded to 2pt to allow for minor Y jitter.
+    """
+    def _log(msg):
+        if log is not None:
+            log.append(msg)
+
+    try:
+        import fitz
+    except ImportError:
+        _log("[AUTONUM] fitz not available — skipping autonumber extraction")
+        return {}
+
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    except Exception as exc:
+        _log(f"[AUTONUM] ERROR opening PDF: {exc}")
+        return {}
+
+    result: dict[tuple[int, float], int] = {}
+
+    for pg_idx, page in enumerate(doc):
+        if page_indices is not None and pg_idx not in page_indices:
+            continue
+
+        # Extract all text spans with bounding boxes
+        blocks = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+        for block in blocks:
+            if block.get("type") != 0:   # text blocks only
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    txt = span.get("text", "").strip()
+                    bbox = span.get("bbox", (0, 0, 0, 0))
+                    span_w = bbox[2] - bbox[0]
+                    y_mid  = round((bbox[1] + bbox[3]) / 2, 0)
+
+                    # Isolated digit: short width, matches 1-2 digits only
+                    if (
+                        re.match(r"^\d{1,2}$", txt)
+                        and span_w < 25.0
+                    ):
+                        num = int(txt)
+                        key = (pg_idx, y_mid)
+                        result[key] = num
+                        _log(f"[AUTONUM] pg={pg_idx} y={y_mid:.1f} "
+                             f"x0={bbox[0]:.1f} w={span_w:.1f} num={num}")
+
+    doc.close()
+    _log(f"[AUTONUM] total autonumbers found: {len(result)}")
+    return result
+
+
 def extract_pdf(
     file_bytes: bytes,
     page_range: str = "",
@@ -917,7 +985,8 @@ def extract_pdf(
                    re.match(r"^[●○■□▸▹►]", text):
                     text = re.sub(r"^[•–\-▪◆●○■□▸▹►]\s*", "", text)
                     block_type = "list_item"
-                    meta = {"list_kind": "bullet"}
+                    meta = {"list_kind": "bullet",
+                            "_page_idx_para": page_idx, "_para_top": top}
                     page_blocks.append((top, make_block(block_type, text, metadata=meta)))
                     prev_para = None
                     continue
@@ -953,6 +1022,9 @@ def extract_pdf(
                 blk = make_block(block_type, text, level=level)
                 if line_is_bold and block_type == "paragraph":
                     blk["metadata"]["bold"] = True
+                # Store coordinates for PyMuPDF spatial join
+                blk["metadata"]["_page_idx_para"] = page_idx
+                blk["metadata"]["_para_top"]      = top
                 page_blocks.append((top, blk))
                 prev_para = block_type if block_type == "paragraph" else None
 
@@ -966,6 +1038,43 @@ def extract_pdf(
     if blocks:
         blocks[0]["metadata"]["dropped_count"]       = dropped_count
         blocks[0]["metadata"]["blank_pages_skipped"] = blank_pages_skipped
+
+    # Extract FrameMaker autonumbers via PyMuPDF spatial join
+    _autonums: dict[tuple[int, float], int] = {}
+    try:
+        import fitz  # noqa — optional dependency
+        _autonums = _extract_autonumbers(file_bytes, page_indices,
+                                         log=debug_log)
+        _log(f"[AUTONUM] {len(_autonums)} autonumber(s) extracted")
+    except Exception as _ae:
+        _log(f"[AUTONUM] skipped: {_ae}")
+
+    if _autonums:
+        for _blk in blocks:
+            if _blk.get("type") != "paragraph":
+                continue
+            _meta = _blk.get("metadata", {})
+            _pg   = _meta.get("_page_idx_para")
+            _top  = _meta.get("_para_top")
+            if _pg is None or _top is None:
+                continue
+            # Look for an autonumber within 6pt Y of this paragraph
+            for _dy in range(-6, 7):
+                _key = (_pg, round(_top + _dy, 0))
+                if _key in _autonums:
+                    _blk["type"] = "list_item"
+                    _blk["metadata"]["list_kind"] = "numbered"
+                    _blk["metadata"]["num"] = _autonums[_key]
+                    _log(f"[AUTONUM] matched pg={_pg} top={_top:.1f} "
+                         f"→ step {_autonums[_key]}: "
+                         f"{_blk.get('text','')[:50]!r}")
+                    break
+
+    # Clean up internal coordinate keys
+    for b in blocks:
+        m = b.get("metadata", {})
+        m.pop("_page_idx_para", None)
+        m.pop("_para_top",      None)
 
     # Image extraction pass (PyMuPDF) — runs only when requested
     fig_total = sum(1 for b in blocks if b["type"] == "figure")
