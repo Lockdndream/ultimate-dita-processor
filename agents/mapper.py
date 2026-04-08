@@ -73,7 +73,6 @@ class Mapper:
         topic_type = self._detect_topic_type(blocks)
 
         first_h1_seen = False
-        in_task_context = False
         fallback_count = 0
 
         for i, block in enumerate(blocks):
@@ -88,10 +87,8 @@ class Mapper:
                     if not first_h1_seen:
                         block["dita_element"] = "title"
                         first_h1_seen = True
-                        in_task_context = False
                     else:
                         block["dita_element"] = "section_title"
-                        in_task_context = False
                 elif level in (2, 3):
                     block["dita_element"] = "sectiondiv_title"
                 else:
@@ -100,11 +97,6 @@ class Mapper:
 
             # ---- Paragraphs ----
             if btype == "paragraph":
-                tl = text.lower()
-                # Task-context trigger
-                if any(sig in tl for sig in self._task_signals):
-                    in_task_context = True
-
                 # UI menucascade
                 if self._ui_pattern.match(text) and ">" in text:
                     block["dita_element"] = "menucascade"
@@ -119,7 +111,11 @@ class Mapper:
                 if list_kind == "bullet":
                     block["dita_element"] = "ul_li"
                 elif list_kind == "numbered":
-                    if in_task_context and topic_type == "task":
+                    if topic_type == "task":
+                        # All numbered items in a task topic are steps.
+                        # in_task_context was unreliable — it reset on every H1
+                        # heading and required a specific signal phrase before the
+                        # numbered list, which is not always present.
                         block["dita_element"] = "step"
                     else:
                         block["dita_element"] = "ol_li"
@@ -269,11 +265,35 @@ class Mapper:
     # -----------------------------------------------------------------------
 
     def _detect_topic_type(self, blocks: list[dict]) -> str:
-        all_text = " ".join(b.get("text", "").lower() for b in blocks)
-        for sig in self._task_signals:
-            if sig in all_text:
-                return "task"
+        """
+        Detect topic type from document structure.
+
+        Rules:
+          task      → 3 or more numbered list_item blocks
+                      (structural signal — reliable regardless of phrasing)
+          reference → majority of body blocks are tables
+          concept   → default
+        """
+        numbered_count = sum(
+            1 for b in blocks
+            if b.get("type") == "list_item"
+            and b.get("metadata", {}).get("list_kind") == "numbered"
+        )
+        if numbered_count >= 3:
+            return "task"
+
+        # Reference: majority of non-heading body blocks are tables
+        body_blocks = [
+            b for b in blocks
+            if b.get("type") not in ("heading",)
+            and b.get("type") is not None
+        ]
+        table_count = sum(1 for b in body_blocks if b.get("type") == "table")
+        if body_blocks and table_count / len(body_blocks) >= 0.5:
+            return "reference"
+
         for sig in self._ref_signals:
-            if sig in all_text:
+            if any(sig in b.get("text", "").lower() for b in blocks):
                 return "reference"
+
         return self.rules.get("topic_type", "concept")
