@@ -644,7 +644,16 @@ class Generator:
                     _safe_text(sec_title, text)
                 else:
                     # Ditabase: sibling typed topic on the <dita> root
-                    sub_type = _detect_topic_type([block])
+                    # Collect lookahead blocks for this sub-topic to detect type correctly
+                    _lookahead = [block]
+                    _j = blocks.index(block) + 1 if block in blocks else len(blocks)
+                    while _j < len(blocks):
+                        _nb = blocks[_j]
+                        if _nb.get("dita_element") == "sectiondiv_title":
+                            break
+                        _lookahead.append(_nb)
+                        _j += 1
+                    sub_type = _detect_topic_type(_lookahead)
                     sub_body_tag = _BODY_ELEM.get(sub_type, "body")
                     anchor = dita_root if dita_root is not None else body.getparent()
                     sibling = etree.SubElement(anchor, _tag(ns, sub_type))
@@ -655,6 +664,7 @@ class Generator:
                     body = sib_body
                     current_section = None
                     current_sectiondiv = None
+                    topic_type = sub_type   # update so numbered_li resolves correctly
                 continue
 
             parent = current_sectiondiv or current_section or body
