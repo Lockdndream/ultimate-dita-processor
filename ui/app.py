@@ -537,6 +537,43 @@ with right:
             _stage(ph_extractor, "EXTRACTOR", "✅",
                    f"{len(blocks)} blocks · {n_imgs} image(s) found")
 
+            # Block type breakdown for diagnosis
+            from collections import Counter as _Counter
+            _btype_counts = _Counter(b.get("type") for b in blocks)
+            _meta_kinds   = _Counter(
+                b.get("metadata", {}).get("list_kind")
+                for b in blocks if b.get("type") == "list_item"
+            )
+            debug_log.append(f"[BLOCKS] type breakdown: {dict(_btype_counts)}")
+            debug_log.append(f"[BLOCKS] list_item kinds: {dict(_meta_kinds)}")
+
+            # Sample paragraphs that look like numbered items (digit at start)
+            _numbered_paras = [
+                b.get("text", "")[:80]
+                for b in blocks
+                if b.get("type") == "paragraph"
+                and b.get("text", "")[:4].strip().rstrip(".)").isdigit()
+            ]
+            if _numbered_paras:
+                debug_log.append(
+                    f"[BLOCKS] paragraphs starting with digit "
+                    f"({len(_numbered_paras)} found — likely undetected steps):"
+                )
+                for _t in _numbered_paras[:15]:
+                    debug_log.append(f"  → {_t!r}")
+            else:
+                debug_log.append("[BLOCKS] no paragraphs starting with digit found")
+
+            # Sample of all list_item blocks
+            _list_items = [b for b in blocks if b.get("type") == "list_item"]
+            if _list_items:
+                debug_log.append(f"[BLOCKS] list_item sample (first 10):")
+                for _b in _list_items[:10]:
+                    _kind = _b.get("metadata", {}).get("list_kind", "?")
+                    debug_log.append(f"  [{_kind}] {_b.get('text','')[:70]!r}")
+            else:
+                debug_log.append("[BLOCKS] no list_item blocks found at all")
+
             _stage(ph_mapper, "MAPPER", "⏳", "Applying YAML mapping rules…")
             blocks = Mapper().map(blocks)
             _stage(ph_mapper, "MAPPER", "✅", "Topic type detected")
