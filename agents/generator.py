@@ -551,8 +551,10 @@ class Generator:
             nonlocal step_buffer
             if not step_buffer:
                 return
-            parent = current_sectiondiv or current_section or body
-            steps_el = etree.SubElement(parent, _tag(ns, "steps"))
+            # <steps> is only valid as direct child of <taskbody>
+            # Never emit inside <section> or <sectiondiv>
+            steps_parent = body
+            steps_el = etree.SubElement(steps_parent, _tag(ns, "steps"))
             for sb in step_buffer:
                 step_el = etree.SubElement(steps_el, _tag(ns, "step"))
                 cmd_el = etree.SubElement(step_el, _tag(ns, "cmd"))
@@ -605,7 +607,8 @@ class Generator:
 
             # Skip first paragraph (already used as shortdesc)
             if de == "p" and not first_para_done and skip_first_para:
-                if text == skip_first_para:
+                # Use startswith to handle minor trailing whitespace differences
+                if text.strip() == skip_first_para.strip():
                     first_para_done = True
                     continue
 
@@ -613,9 +616,18 @@ class Generator:
             if de == "section_title":
                 flush_all()
                 current_sectiondiv = None
-                current_section = etree.SubElement(body, _tag(ns, "section"))
-                sec_title = etree.SubElement(current_section, _tag(ns, "title"))
-                _safe_text(sec_title, text)
+                if topic_type == "task":
+                    # taskbody forbids <section> — render heading as bold <p>
+                    # and keep body as the current parent
+                    current_section = None
+                    if text.strip():
+                        p_el = etree.SubElement(body, _tag(ns, "p"))
+                        b_el = etree.SubElement(p_el, _tag(ns, "b"))
+                        _safe_text(b_el, text)
+                else:
+                    current_section = etree.SubElement(body, _tag(ns, "section"))
+                    sec_title = etree.SubElement(current_section, _tag(ns, "title"))
+                    _safe_text(sec_title, text)
                 continue
 
             # ---- sectiondiv_title: H2/H3/H4 heading ----
@@ -656,7 +668,9 @@ class Generator:
             # ---- Menucascade ----
             if de == "menucascade":
                 flush_all()
-                mc = etree.SubElement(parent, _tag(ns, "menucascade"))
+                # menucascade is inline — must be wrapped in <p>
+                p_el = etree.SubElement(parent, _tag(ns, "p"))
+                mc = etree.SubElement(p_el, _tag(ns, "menucascade"))
                 for segment in re.split(r"\s*>\s*", text):
                     seg = segment.strip()
                     if seg:
@@ -697,7 +711,8 @@ class Generator:
                 else:
                     note_el = etree.SubElement(parent, _tag(ns, "note"))
                     note_el.set("type", note_type)
-                    _safe_text(note_el, text)
+                    note_p = etree.SubElement(note_el, _tag(ns, "p"))
+                    _apply_inline(note_p, text, ns)
                 continue
 
             # ---- Figure ----
