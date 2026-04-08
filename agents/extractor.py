@@ -746,16 +746,10 @@ def _extract_autonumbers(
                     span_w = bbox[2] - bbox[0]
                     y_mid  = round((bbox[1] + bbox[3]) / 2, 0)
 
-                    # Isolated digit: short width, matches 1-2 digits only
-                    if (
-                        re.match(r"^\d{1,2}$", txt)
-                        and span_w < 25.0
-                    ):
-                        num = int(txt)
-                        key = (pg_idx, y_mid)
-                        result[key] = num
-                        _log(f"[AUTONUM] pg={pg_idx} y={y_mid:.1f} "
-                             f"x0={bbox[0]:.1f} w={span_w:.1f} num={num}")
+                    if pg_idx in (3, 4, 5):
+                        _log(f"[SPAN] pg={pg_idx} y={y_mid:.1f} "
+                             f"x0={bbox[0]:.1f} w={span_w:.1f} "
+                             f"txt={txt[:40]!r}")
 
     doc.close()
     _log(f"[AUTONUM] total autonumbers found: {len(result)}")
