@@ -1023,6 +1023,13 @@ def extract_pdf(
                     and any("Bold" in w.get("fontname", "") for w in word_group)
                 )
 
+                if page_idx in (3, 4, 5):
+                    for _w in word_group:
+                        _fn = _w.get("fontname", "")
+                        if "Italic" in _fn or "Oblique" in _fn or "It" in _fn:
+                            _log(f"[ITALIC] pg={page_idx} top={top:.1f} "
+                                 f"font={_fn!r} text={_w.get('text','')[:40]!r}")
+
                 if _should_drop(text):
                     dropped_count += 1
                     continue
