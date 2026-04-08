@@ -111,14 +111,10 @@ class Mapper:
                 if list_kind == "bullet":
                     block["dita_element"] = "ul_li"
                 elif list_kind == "numbered":
-                    if topic_type == "task":
-                        # All numbered items in a task topic are steps.
-                        # in_task_context was unreliable — it reset on every H1
-                        # heading and required a specific signal phrase before the
-                        # numbered list, which is not always present.
-                        block["dita_element"] = "step"
-                    else:
-                        block["dita_element"] = "ol_li"
+                    # Do not resolve step vs ol_li here — the mapper does not have
+                    # chunk context. The generator detects topic type per-chunk and
+                    # resolves this correctly at render time.
+                    block["dita_element"] = "numbered_li"
                 else:
                     block["dita_element"] = "ul_li"
                 continue
