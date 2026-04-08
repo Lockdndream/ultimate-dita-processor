@@ -387,7 +387,7 @@ with left:
 
     st.markdown(
         '<div style="font-size:10px;color:#c8ff00;letter-spacing:0.12em;'
-        'margin-bottom:8px;font-family:monospace;">v1.4.4 · step-num-logging</div>',
+        'margin-bottom:8px;font-family:monospace;">v1.4.5 · step-num-clear-fix</div>',
         unsafe_allow_html=True,
     )
 

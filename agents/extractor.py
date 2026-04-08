@@ -932,9 +932,9 @@ def extract_pdf(
                     prev_para = None
                     continue
 
-                # Clear pending number if a non-paragraph line arrives
-                # (e.g. a figure caption or heading between the number and text)
-                if pending_step_num is not None and block_type not in ("paragraph", "heading"):
+                # Only clear on a new heading — figures and notes can appear
+                # between a FrameMaker step number and its text line
+                if pending_step_num is not None and block_type == "heading":
                     _log(f"[STEP_NUM] pending cleared by block_type={block_type} "
                          f"text={text[:30]!r}")
                     pending_step_num = None
