@@ -592,13 +592,12 @@ class Generator:
         current_section: etree._Element | None = None
         current_sectiondiv: etree._Element | None = None
         step_buffer: list[dict] = []
-        substep_buffer: list[list[dict]] = []  # list of substep groups per step
         ul_buffer: list[dict] = []
         ol_buffer: list[dict] = []
         skip_first_para = first_para_text  # used as shortdesc already
 
         def flush_steps():
-            nonlocal step_buffer, substep_buffer
+            nonlocal step_buffer
             if not step_buffer:
                 return
             # <steps> is only valid as direct child of <taskbody>
@@ -607,21 +606,9 @@ class Generator:
             steps_el = etree.SubElement(steps_parent, _tag(ns, "steps"))
             for sb in step_buffer:
                 step_el = etree.SubElement(steps_el, _tag(ns, "step"))
-                cmd_el = etree.SubElement(step_el, _tag(ns, "cmd"))
+                cmd_el  = etree.SubElement(step_el, _tag(ns, "cmd"))
                 _safe_text(cmd_el, sb.get("text", ""))
-                # DITA 2.0: sub-steps nest as <steps><step> inside parent <step>
-                # substeps/substep were removed in DITA 2.0
-                pending = substep_buffer.pop(0) if substep_buffer else []
-                if pending:
-                    nested_steps_el = etree.SubElement(step_el, _tag(ns, "steps"))
-                    for ssb in pending:
-                        nested_step_el = etree.SubElement(
-                            nested_steps_el, _tag(ns, "step"))
-                        nested_cmd_el  = etree.SubElement(
-                            nested_step_el, _tag(ns, "cmd"))
-                        _safe_text(nested_cmd_el, ssb.get("text", ""))
             step_buffer = []
-            substep_buffer = []
 
         def flush_ul():
             nonlocal ul_buffer
@@ -785,14 +772,6 @@ class Generator:
                     flush_steps()
                     flush_ul()
                     ol_buffer.append(block)
-                continue
-
-            if de == "substep":
-                # Buffer under the current step
-                if step_buffer:
-                    if not substep_buffer:
-                        substep_buffer.append([])
-                    substep_buffer[-1].append(block)
                 continue
 
             # ---- Hazard statement / Note ----

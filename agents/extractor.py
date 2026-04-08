@@ -760,25 +760,11 @@ def _extract_autonumbers(
 
     doc.close()
 
-    # Detect two X-offset tiers (main steps vs sub-steps).
-    # Find the largest gap between distinct x0 values — if >8pt, split there.
-    all_x0s = sorted(set(round(c[2], 0) for c in candidates))
-    tier_boundary: float | None = None
-    if len(all_x0s) > 1:
-        gaps = [(all_x0s[i + 1] - all_x0s[i], i) for i in range(len(all_x0s) - 1)]
-        max_gap, max_idx = max(gaps)
-        if max_gap > 8.0:
-            tier_boundary = (all_x0s[max_idx] + all_x0s[max_idx + 1]) / 2
-            _log(f"[AUTONUM] tier boundary at x0={tier_boundary:.1f}pt "
-                 f"(gap={max_gap:.1f}pt)")
-
     # Build result dict with placeholder values
-    result: dict[tuple[int, float], dict] = {}
+    result: dict[tuple[int, float], int] = {}
     for pg_idx, y_mid, span_x0, span_w in candidates:
         key = (pg_idx, y_mid)
-        result[key] = {"num": -1, "is_substep": (
-            tier_boundary is not None and span_x0 > tier_boundary
-        )}
+        result[key] = -1   # placeholder, sequence assigned below
 
     # Assign sequential step numbers by geometric order.
     # Counter resets on new page or large Y gap (new section).
@@ -792,12 +778,11 @@ def _extract_autonumbers(
         if pg_idx_k != prev_pg or (y_mid_k - prev_y) > 200.0:
             step_num = 0
         step_num += 1
-        result[key]["num"] = step_num
+        result[key] = step_num
         prev_pg = pg_idx_k
         prev_y  = y_mid_k
         _log(f"[AUTONUM] assigned pg={pg_idx_k} y={y_mid_k:.1f} "
-             f"→ {'sub' if result[key]['is_substep'] else 'main'} "
-             f"step {step_num}")
+             f"→ step {step_num}")
 
     _log(f"[AUTONUM] total autonumbers found: {len(result)}")
     return result
@@ -1081,7 +1066,7 @@ def extract_pdf(
         blocks[0]["metadata"]["blank_pages_skipped"] = blank_pages_skipped
 
     # Extract FrameMaker autonumbers via PyMuPDF spatial join
-    _autonums: dict[tuple[int, float], dict] = {}
+    _autonums: dict[tuple[int, float], int] = {}
     try:
         import fitz  # noqa — optional dependency
         _autonums = _extract_autonumbers(file_bytes, page_indices,
@@ -1103,16 +1088,11 @@ def extract_pdf(
             for _dy in range(-15, 16):
                 _key = (_pg, round(_top + _dy, 0))
                 if _key in _autonums:
-                    match = _autonums[_key]
                     _blk["type"] = "list_item"
-                    if match["is_substep"]:
-                        _blk["metadata"]["list_kind"] = "substep"
-                    else:
-                        _blk["metadata"]["list_kind"] = "numbered"
-                    _blk["metadata"]["num"] = match["num"]
+                    _blk["metadata"]["list_kind"] = "numbered"
+                    _blk["metadata"]["num"] = _autonums[_key]
                     _log(f"[AUTONUM] matched pg={_pg} top={_top:.1f} "
-                         f"→ {'sub' if match['is_substep'] else 'main'} "
-                         f"step {match['num']}: "
+                         f"→ step {_autonums[_key]}: "
                          f"{_blk.get('text','')[:50]!r}")
                     break
 
