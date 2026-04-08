@@ -913,6 +913,12 @@ def extract_pdf(
                     dropped_count += 1
                     continue
 
+                if any("proceed" in (b[1].get("text","").lower())
+                       for b in page_blocks) or "proceed" in text.lower():
+                    _log(f"[PROBE] pg={page_idx} top={top:.1f} "
+                         f"block_type={block_type} bold={line_is_bold} "
+                         f"text={text[:80]!r}")
+
                 # FrameMaker orphaned step number — digit alone on a line
                 # e.g. pdfplumber extracts "1" and "Remove the feet..." separately
                 if re.match(r"^\d{1,2}$", text.strip()) and block_type in ("paragraph", "heading"):
