@@ -893,6 +893,7 @@ def extract_pdf(
                 lines.setdefault(top, []).append(w)
 
             prev_para = None
+            pending_step_num: int | None = None   # FrameMaker orphaned step number
             for top in sorted(lines):
                 word_group = lines[top]
                 text = " ".join(w["text"] for w in word_group).strip()
@@ -911,6 +912,26 @@ def extract_pdf(
                 if block_type == "dropped":
                     dropped_count += 1
                     continue
+
+                # FrameMaker orphaned step number — digit alone on a line
+                # e.g. pdfplumber extracts "1" and "Remove the feet..." separately
+                if re.match(r"^\d{1,2}$", text.strip()) and block_type in ("paragraph", "heading"):
+                    pending_step_num = int(text.strip())
+                    prev_para = None
+                    continue   # do not emit a block — wait for the text line
+
+                # If a step number is pending, attach it to this line
+                if pending_step_num is not None and block_type in ("paragraph", "heading"):
+                    meta = {"list_kind": "numbered", "num": pending_step_num}
+                    pending_step_num = None
+                    page_blocks.append((top, make_block("list_item", text, metadata=meta)))
+                    prev_para = None
+                    continue
+
+                # Clear pending number if a non-paragraph line arrives
+                # (e.g. a figure caption or heading between the number and text)
+                if pending_step_num is not None and block_type not in ("paragraph", "heading"):
+                    pending_step_num = None
 
                 # Bullet detection
                 if text.startswith(("•", "–", "-", "▪", "◆")) or \
