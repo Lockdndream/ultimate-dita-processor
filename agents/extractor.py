@@ -733,9 +733,6 @@ def extract_pdf(
         # Resolve page range filter
         page_indices = _parse_page_range(page_range, total_pages)  # None = all pages
 
-        class _StepCounter: n = 0
-        step_counter_holder = _StepCounter()
-
         for page_idx, page in enumerate(pdf.pages):
 
             # ---- Page range filter (B-001) ----
@@ -895,21 +892,6 @@ def extract_pdf(
                         continue  # don't add superscript as its own word
                 lines.setdefault(top, []).append(w)
 
-            # Calculate the body text baseline x0 for this page.
-            # Most body paragraphs share a common left indent.
-            # Steps are indented further right than this baseline.
-            _page_x0s = []
-            for _wg in lines.values():
-                if _wg:
-                    _page_x0s.append(_wg[0]["x0"])
-            if _page_x0s:
-                # Use the most common x0 value as the body baseline
-                from collections import Counter as _Ctr
-                _body_x0 = _Ctr(round(_x, -1) for _x in _page_x0s).most_common(1)[0][0]
-            else:
-                _body_x0 = 0.0
-            _STEP_INDENT_THRESHOLD = 18.0  # pt — steps indented more than this
-
             prev_para = None
             for top in sorted(lines):
                 word_group = lines[top]
@@ -930,10 +912,6 @@ def extract_pdf(
                     dropped_count += 1
                     continue
 
-                # Reset step counter on each new heading
-                if block_type == "heading":
-                    step_counter_holder.n = 0
-
                 # Bullet detection
                 if text.startswith(("•", "–", "-", "▪", "◆")) or \
                    re.match(r"^[●○■□▸▹►]", text):
@@ -941,28 +919,6 @@ def extract_pdf(
                     block_type = "list_item"
                     meta = {"list_kind": "bullet"}
                     page_blocks.append((top, make_block(block_type, text, metadata=meta)))
-                    prev_para = None
-                    continue
-
-                # Indent-based step detection:
-                # FrameMaker auto-numbered steps are indented further right
-                # than body paragraphs. No phrase trigger needed.
-                first_x0 = word_group[0]["x0"] if word_group else 0.0
-                is_step_indent = (
-                    first_x0 > _body_x0 + _STEP_INDENT_THRESHOLD
-                    and block_type == "paragraph"
-                    and not line_is_bold
-                    and not re.match(r"^Figure\s+\d", text, re.IGNORECASE)
-                    and not re.match(r"^Notes?:", text, re.IGNORECASE)
-                )
-                if is_step_indent:
-                    step_counter = step_counter_holder.n + 1
-                    step_counter_holder.n = step_counter
-                    meta = {"list_kind": "numbered", "num": step_counter}
-                    _log(f"[STEP_INDENT] pg={page_idx} x0={first_x0:.1f} "
-                         f"baseline={_body_x0:.1f} step={step_counter} "
-                         f"text={text[:50]!r}")
-                    page_blocks.append((top, make_block("list_item", text, metadata=meta)))
                     prev_para = None
                     continue
 
