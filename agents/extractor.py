@@ -923,12 +923,14 @@ def extract_pdf(
                     continue
 
                 # Numbered item detection
-                num_match = re.match(r"^(\d{1,2})\s{1,4}(.+)", text)
-                if num_match and block_type == "paragraph":
-                    text = num_match.group(2)
-                    block_type = "list_item"
-                    meta = {"list_kind": "numbered", "num": int(num_match.group(1))}
-                    page_blocks.append((top, make_block(block_type, text, metadata=meta)))
+                # Allow heading block_type too — FrameMaker bold numbered steps
+                # are classified as headings by font size but are list items by structure.
+                num_match = re.match(r"^(\d{1,2})[.)]\s+(.+)|^(\d{1,2})\s{1,4}(.+)", text)
+                if num_match and block_type in ("paragraph", "heading"):
+                    num  = int(num_match.group(1) or num_match.group(3) or 0)
+                    text = (num_match.group(2) or num_match.group(4) or "").strip()
+                    meta = {"list_kind": "numbered", "num": num}
+                    page_blocks.append((top, make_block("list_item", text, metadata=meta)))
                     prev_para = None
                     continue
 
