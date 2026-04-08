@@ -62,7 +62,10 @@ def _safe_filename(title: str, index: int) -> str:
     return (slug or f"topic_{index:02d}") + ".dita"
 
 
-def _detect_topic_type(chunk: list[dict]) -> str:
+def _detect_topic_type(
+    chunk: list[dict],
+    log: list[str] | None = None,
+) -> str:
     """
     Detect the DITA topic type for a chunk of blocks.
 
@@ -84,7 +87,24 @@ def _detect_topic_type(chunk: list[dict]) -> str:
         if b.get("dita_element") in ("title", "section_title"):
             title_words = b.get("text", "").strip().split()
             if title_words and title_words[0].lower() == "appendix":
-                return "reference"
+                result = "reference"
+                if log is not None:
+                    numbered_count = sum(1 for e in elements if e == "numbered_li")
+                    step_count     = sum(1 for e in elements if e == "step")
+                    table_count    = sum(1 for e in elements if e == "table")
+                    para_count     = sum(1 for e in elements if e == "p")
+                    title_text     = next(
+                        (b.get("text", "")[:60] for b in chunk
+                         if b.get("dita_element") in ("title", "section_title")),
+                        "(no title)"
+                    )
+                    log.append(
+                        f"[TOPIC_TYPE] '{title_text}' → {result}"
+                        f"  numbered_li={numbered_count} step={step_count}"
+                        f"  table={table_count} p={para_count}"
+                        f"  total_blocks={len(chunk)}"
+                    )
+                return result
             break
 
     body_elements = [e for e in elements if e not in (
@@ -92,26 +112,43 @@ def _detect_topic_type(chunk: list[dict]) -> str:
     )]
 
     if not body_elements:
-        return "topic"
+        result = "topic"
+    else:
+        # Rule 3: steps or ≥2 unresolved numbered items → task
+        numbered_li_count = sum(1 for e in elements if e == "numbered_li")
+        if "step" in elements or numbered_li_count >= 2:
+            result = "task"
+        else:
+            # Rule 4: majority tables → reference
+            table_count = sum(1 for e in body_elements if e == "table")
+            para_count  = sum(1 for e in body_elements if e == "p")
+            total = len(body_elements)
 
-    # Rule 3: steps or ≥2 unresolved numbered items → task
-    numbered_li_count = sum(1 for e in elements if e == "numbered_li")
-    if "step" in elements or numbered_li_count >= 2:
-        return "task"
+            if total > 0 and table_count / total >= 0.5:
+                result = "reference"
+            # Rule 5: prose → concept
+            elif para_count > 0:
+                result = "concept"
+            else:
+                result = "topic"
 
-    # Rule 4: majority tables → reference
-    table_count = sum(1 for e in body_elements if e == "table")
-    para_count  = sum(1 for e in body_elements if e == "p")
-    total = len(body_elements)
-
-    if total > 0 and table_count / total >= 0.5:
-        return "reference"
-
-    # Rule 5: prose → concept
-    if para_count > 0:
-        return "concept"
-
-    return "topic"
+    if log is not None:
+        numbered_count = sum(1 for e in elements if e == "numbered_li")
+        step_count     = sum(1 for e in elements if e == "step")
+        table_count    = sum(1 for e in elements if e == "table")
+        para_count     = sum(1 for e in elements if e == "p")
+        title_text     = next(
+            (b.get("text", "")[:60] for b in chunk
+             if b.get("dita_element") in ("title", "section_title")),
+            "(no title)"
+        )
+        log.append(
+            f"[TOPIC_TYPE] '{title_text}' → {result}"
+            f"  numbered_li={numbered_count} step={step_count}"
+            f"  table={table_count} p={para_count}"
+            f"  total_blocks={len(chunk)}"
+        )
+    return result
 
 
 def _apply_inline(element: etree._Element, text: str, ns: str,
@@ -230,7 +267,11 @@ class Generator:
     # Public: generate one or more topics
     # -----------------------------------------------------------------------
 
-    def generate(self, blocks: list[dict]) -> list[tuple[str, str]]:
+    def generate(
+        self,
+        blocks: list[dict],
+        debug_log: list[str] | None = None,
+    ) -> list[tuple[str, str]]:
         """
         Split blocks at every section_title boundary and generate one DITA
         2.0 XML string per topic. Topic type is detected per chunk.
@@ -244,8 +285,8 @@ class Generator:
         results: list[tuple[str, str]] = []
         for i, chunk in enumerate(topic_chunks):
             # Per-chunk type detection (Fix 1 / S-09)
-            topic_type = _detect_topic_type(chunk)
-            xml_str = self._render_topic(chunk, topic_type)
+            topic_type = _detect_topic_type(chunk, log=debug_log)
+            xml_str = self._render_topic(chunk, topic_type, debug_log=debug_log)
             # Derive filename from title block
             title_text = ""
             for b in chunk:
@@ -432,7 +473,12 @@ class Generator:
     # Render a single topic to XML string
     # -----------------------------------------------------------------------
 
-    def _render_topic(self, blocks: list[dict], topic_type: str) -> str:
+    def _render_topic(
+        self,
+        blocks: list[dict],
+        topic_type: str,
+        debug_log: list[str] | None = None,
+    ) -> str:
         # Find title
         title_text = "Untitled Topic"
         for b in blocks:
@@ -503,7 +549,8 @@ class Generator:
         # Render blocks — H2/H3 handling depends on context
         self._render_blocks(blocks, body, ns, title_text, first_para,
                             is_introduction=is_intro, topic_type=topic_type,
-                            dita_root=root if use_ditabase else None)
+                            dita_root=root if use_ditabase else None,
+                            debug_log=debug_log)
 
         # Serialise
         xml_bytes = etree.tostring(
@@ -539,6 +586,7 @@ class Generator:
         is_introduction: bool = False,
         topic_type: str = "concept",
         dita_root: etree._Element | None = None,
+        debug_log: list[str] | None = None,
     ) -> None:
 
         current_section: etree._Element | None = None
@@ -654,6 +702,11 @@ class Generator:
                         _lookahead.append(_nb)
                         _j += 1
                     sub_type = _detect_topic_type(_lookahead)
+                    if debug_log is not None:
+                        debug_log.append(
+                            f"[TOPIC_TYPE] sectiondiv '{text[:60]}' → {sub_type}"
+                            f"  lookahead={len(_lookahead)} blocks"
+                        )
                     sub_body_tag = _BODY_ELEM.get(sub_type, "body")
                     anchor = dita_root if dita_root is not None else body.getparent()
                     sibling = etree.SubElement(anchor, _tag(ns, sub_type))

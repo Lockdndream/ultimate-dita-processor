@@ -385,6 +385,12 @@ with left:
         unsafe_allow_html=True,
     )
 
+    st.markdown(
+        '<div style="font-size:10px;color:#c8ff00;letter-spacing:0.12em;'
+        'margin-bottom:8px;font-family:monospace;">v1.4.0 · topic-type-fix</div>',
+        unsafe_allow_html=True,
+    )
+
     # ── File upload ───────────────────────────────────────────────────────────
     uploaded_file = st.file_uploader(
         "Select a PDF or DOCX file",
@@ -563,7 +569,7 @@ with right:
                 debug_log.append(f"[UI] _build_media produced {len(media)} file(s): {list(media.keys())}")
 
             gen         = Generator()
-            topic_files = gen.generate(blocks)
+            topic_files = gen.generate(blocks, debug_log=debug_log)
             map_title   = Path(file_name).stem.replace("_", " ").replace("-", " ").title()
 
             map_str  = (gen.generate_bookmap(topic_files, map_title=map_title)
