@@ -917,12 +917,16 @@ def extract_pdf(
                 # e.g. pdfplumber extracts "1" and "Remove the feet..." separately
                 if re.match(r"^\d{1,2}$", text.strip()) and block_type in ("paragraph", "heading"):
                     pending_step_num = int(text.strip())
+                    _log(f"[STEP_NUM] orphaned digit detected: {text.strip()!r} "
+                         f"at top={top:.1f} pg={page_idx} block_type={block_type}")
                     prev_para = None
                     continue   # do not emit a block — wait for the text line
 
                 # If a step number is pending, attach it to this line
                 if pending_step_num is not None and block_type in ("paragraph", "heading"):
                     meta = {"list_kind": "numbered", "num": pending_step_num}
+                    _log(f"[STEP_NUM] consumed pending={pending_step_num} "
+                         f"with text={text[:60]!r} block_type={block_type}")
                     pending_step_num = None
                     page_blocks.append((top, make_block("list_item", text, metadata=meta)))
                     prev_para = None
@@ -931,6 +935,8 @@ def extract_pdf(
                 # Clear pending number if a non-paragraph line arrives
                 # (e.g. a figure caption or heading between the number and text)
                 if pending_step_num is not None and block_type not in ("paragraph", "heading"):
+                    _log(f"[STEP_NUM] pending cleared by block_type={block_type} "
+                         f"text={text[:30]!r}")
                     pending_step_num = None
 
                 # Bullet detection
@@ -951,6 +957,8 @@ def extract_pdf(
                     num  = int(num_match.group(1) or num_match.group(3) or 0)
                     text = (num_match.group(2) or num_match.group(4) or "").strip()
                     meta = {"list_kind": "numbered", "num": num}
+                    _log(f"[STEP_NUM] same-line match: num={num!r} "
+                         f"text={text[:60]!r} block_type={block_type}")
                     page_blocks.append((top, make_block("list_item", text, metadata=meta)))
                     prev_para = None
                     continue
