@@ -986,14 +986,41 @@ def extract_pdf(
                         continue  # don't add superscript as its own word
                 lines.setdefault(top, []).append(w)
 
+            # Sort words within each line by x0 so bold/plain splits read correctly
+            for top_key in lines:
+                lines[top_key].sort(key=lambda w: w["x0"])
+
             prev_para = None
             for top in sorted(lines):
                 word_group = lines[top]
-                text = " ".join(w["text"] for w in word_group).strip()
+
+                # Assemble text preserving bold spans as sentinels for
+                # downstream menucascade detection
+                parts = []
+                in_bold = False
+                for w in word_group:
+                    w_bold = "Bold" in w.get("fontname", "")
+                    if w_bold and not in_bold:
+                        parts.append("__BOLD_START__")
+                        in_bold = True
+                    elif not w_bold and in_bold:
+                        parts.append("__BOLD_END__")
+                        in_bold = False
+                    parts.append(w["text"])
+                if in_bold:
+                    parts.append("__BOLD_END__")
+                text = " ".join(p for p in parts
+                                if not p.startswith("__BOLD")).strip()
+                text_with_bold = " ".join(parts).strip()
+
                 # Detect if the entire line is bold (all words have Bold in fontname)
                 line_is_bold = (
                     len(word_group) > 0
                     and all("Bold" in w.get("fontname", "") for w in word_group)
+                )
+                has_inline_bold = (
+                    not line_is_bold
+                    and any("Bold" in w.get("fontname", "") for w in word_group)
                 )
 
                 if _should_drop(text):
@@ -1048,6 +1075,8 @@ def extract_pdf(
                 blk = make_block(block_type, text, level=level)
                 if line_is_bold and block_type == "paragraph":
                     blk["metadata"]["bold"] = True
+                if block_type == "paragraph" and has_inline_bold:
+                    blk["metadata"]["text_with_bold"] = text_with_bold
                 # Store coordinates for PyMuPDF spatial join
                 blk["metadata"]["_page_idx_para"] = page_idx
                 blk["metadata"]["_para_top"]      = top

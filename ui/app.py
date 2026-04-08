@@ -387,7 +387,7 @@ with left:
 
     st.markdown(
         '<div style="font-size:10px;color:#c8ff00;letter-spacing:0.12em;'
-        'margin-bottom:8px;font-family:monospace;">v1.5.7 · substep-reverted</div>',
+        'margin-bottom:8px;font-family:monospace;">v1.5.8 · inline-bold-menucascade</div>',
         unsafe_allow_html=True,
     )
 
