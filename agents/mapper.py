@@ -115,6 +115,8 @@ class Mapper:
                     # chunk context. The generator detects topic type per-chunk and
                     # resolves this correctly at render time.
                     block["dita_element"] = "numbered_li"
+                elif list_kind == "substep":
+                    block["dita_element"] = "substep"
                 else:
                     block["dita_element"] = "ul_li"
                 continue

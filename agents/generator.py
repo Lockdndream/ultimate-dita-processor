@@ -592,12 +592,13 @@ class Generator:
         current_section: etree._Element | None = None
         current_sectiondiv: etree._Element | None = None
         step_buffer: list[dict] = []
+        substep_buffer: list[list[dict]] = []  # list of substep groups per step
         ul_buffer: list[dict] = []
         ol_buffer: list[dict] = []
         skip_first_para = first_para_text  # used as shortdesc already
 
         def flush_steps():
-            nonlocal step_buffer
+            nonlocal step_buffer, substep_buffer
             if not step_buffer:
                 return
             # <steps> is only valid as direct child of <taskbody>
@@ -608,7 +609,16 @@ class Generator:
                 step_el = etree.SubElement(steps_el, _tag(ns, "step"))
                 cmd_el = etree.SubElement(step_el, _tag(ns, "cmd"))
                 _safe_text(cmd_el, sb.get("text", ""))
+                # Attach any pending substeps to this step
+                pending = substep_buffer.pop(0) if substep_buffer else []
+                if pending:
+                    subs_el = etree.SubElement(step_el, _tag(ns, "substeps"))
+                    for ssb in pending:
+                        ss_el = etree.SubElement(subs_el, _tag(ns, "substep"))
+                        scmd  = etree.SubElement(ss_el, _tag(ns, "cmd"))
+                        _safe_text(scmd, ssb.get("text", ""))
             step_buffer = []
+            substep_buffer = []
 
         def flush_ul():
             nonlocal ul_buffer
@@ -772,6 +782,14 @@ class Generator:
                     flush_steps()
                     flush_ul()
                     ol_buffer.append(block)
+                continue
+
+            if de == "substep":
+                # Buffer under the current step
+                if step_buffer:
+                    if not substep_buffer:
+                        substep_buffer.append([])
+                    substep_buffer[-1].append(block)
                 continue
 
             # ---- Hazard statement / Note ----
