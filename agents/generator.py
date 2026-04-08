@@ -94,11 +94,9 @@ def _detect_topic_type(chunk: list[dict]) -> str:
     if not body_elements:
         return "topic"
 
-    # Rule 3: steps or ≥3 unresolved numbered items → task
-    # Use count threshold (≥3) to match mapper's structural detection and
-    # avoid false positives from short numbered lists in concept/reference chunks.
+    # Rule 3: steps or ≥2 unresolved numbered items → task
     numbered_li_count = sum(1 for e in elements if e == "numbered_li")
-    if "step" in elements or numbered_li_count >= 3:
+    if "step" in elements or numbered_li_count >= 2:
         return "task"
 
     # Rule 4: majority tables → reference

@@ -275,7 +275,7 @@ class Mapper:
             if b.get("type") == "list_item"
             and b.get("metadata", {}).get("list_kind") == "numbered"
         )
-        if numbered_count >= 3:
+        if numbered_count >= 2:
             return "task"
 
         # Reference: majority of non-heading body blocks are tables
