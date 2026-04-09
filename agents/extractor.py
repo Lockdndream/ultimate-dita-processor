@@ -990,6 +990,9 @@ def extract_pdf(
             for top_key in lines:
                 lines[top_key].sort(key=lambda w: w["x0"])
 
+            _line_tops = sorted(lines.keys())[:5]
+            _log(f"[YCHECK] pg={page_idx} first 5 tops: {_line_tops}")
+
             prev_para = None
             for top in sorted(lines):
                 word_group = lines[top]
@@ -1013,6 +1016,10 @@ def extract_pdf(
                                 if not p.startswith("__BOLD")).strip()
                 text_with_bold = " ".join(parts).strip()
 
+                if page_idx == 4 and "__BOLD_START__" in text_with_bold:
+                    _log(f"[BOLDCHECK] pg={page_idx} top={top:.1f} "
+                         f"text_with_bold={text_with_bold[:80]!r}")
+
                 # Detect if the entire line is bold (all words have Bold in fontname)
                 line_is_bold = (
                     len(word_group) > 0
@@ -1023,12 +1030,11 @@ def extract_pdf(
                     and any("Bold" in w.get("fontname", "") for w in word_group)
                 )
 
-                if page_idx in (3, 4, 5):
-                    for _w in word_group:
-                        _fn = _w.get("fontname", "")
-                        if "Italic" in _fn or "Oblique" in _fn or "It" in _fn:
-                            _log(f"[ITALIC] pg={page_idx} top={top:.1f} "
-                                 f"font={_fn!r} text={_w.get('text','')[:40]!r}")
+                for _w in word_group:
+                    _fn = _w.get("fontname", "")
+                    if ("Italic" in _fn or "Oblique" in _fn) and top < 740.0:
+                        _log(f"[ITALIC] pg={page_idx} top={top:.1f} "
+                             f"font={_fn!r} text={_w.get('text','')[:50]!r}")
 
                 if _should_drop(text):
                     dropped_count += 1
@@ -1128,6 +1134,7 @@ def extract_pdf(
                     _blk["metadata"]["list_kind"] = "numbered"
                     _blk["metadata"]["num"] = _autonums[_key]
                     _log(f"[AUTONUM] matched pg={_pg} top={_top:.1f} "
+                         f"original_type={_blk.get('type')} "
                          f"→ step {_autonums[_key]}: "
                          f"{_blk.get('text','')[:50]!r}")
                     break
