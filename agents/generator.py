@@ -151,16 +151,53 @@ def _detect_topic_type(
     return result
 
 
+def _apply_tm_only(container: etree._Element, text: str, ns: str) -> None:
+    """
+    Process __TM__{type}__ sentinels in text, appending to container.
+    Plain text is appended directly; TM sentinels become <tm> elements.
+    Does NOT handle __BOLD__ or __ITALIC__ sentinels.
+    """
+    import re as _re
+    parts = _re.split(r"__TM__([a-z]+)__", text)
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            is_last = (i == len(parts) - 1)
+            if not is_last:
+                stripped = part.rstrip()
+                last_space = stripped.rfind(" ")
+                if last_space >= 0:
+                    pre_text = stripped[:last_space + 1]
+                    tm_word  = stripped[last_space + 1:]
+                else:
+                    pre_text = ""
+                    tm_word  = stripped
+                if pre_text:
+                    _append_to(container, pre_text)
+                parts[i] = ""
+                parts[i + 1] = (tm_word, parts[i + 1])
+            else:
+                if part:
+                    _append_to(container, part)
+        else:
+            if isinstance(part, tuple):
+                tm_word, tm_type = part
+            else:
+                tm_word = ""
+                tm_type = part
+            tm_el = etree.SubElement(container, _tag(ns, "tm"))
+            tm_el.set("tmtype", tm_type)
+            tm_el.text = tm_word if tm_word else None
+            tm_el.tail = ""
+
+
 def _apply_inline(element: etree._Element, text: str, ns: str,
                   bold: bool = False) -> None:
     """
-    Set element content handling __TM__{type}__ and __BOLD__ sentinels.
-
-    Sentinel format: "some text wordname__TM__{type}__ more text"
-    The word immediately before __TM__{type}__ becomes the <tm> content:
-      → "some text <tm tmtype='{type}'>wordname</tm> more text"
-
-    __BOLD__ prefix wraps everything in <b>.
+    Set element content handling inline sentinels:
+      __BOLD_START__...__BOLD_END__  → <b> spans
+      __ITALIC_START__...__ITALIC_END__ → <i> spans
+      __BOLD__ prefix                → entire content in <b>
+      wordname__TM__{type}__         → <tm tmtype='{type}'>wordname</tm>
     """
     import re as _re
     if not text:
@@ -170,6 +207,27 @@ def _apply_inline(element: etree._Element, text: str, ns: str,
     if text.startswith("__BOLD__"):
         bold = True
         text = text[8:]
+
+    # Handle __BOLD_START__...__BOLD_END__ inline spans
+    if "__BOLD_START__" in text:
+        # Strip ITALIC sentinels for simplicity in bold-span processing
+        _clean = _re.sub(r"__(?:ITALIC)_(?:START|END)__\s*", "", text)
+        _parts = _re.split(r"(__BOLD_START__|__BOLD_END__)", _clean)
+        _in_bold = False
+        _b_el = None
+        for _bp in _parts:
+            if _bp == "__BOLD_START__":
+                _in_bold = True
+                _b_el = etree.SubElement(element, _tag(ns, "b"))
+            elif _bp == "__BOLD_END__":
+                _in_bold = False
+                _b_el = None
+            elif _bp:
+                if _in_bold and _b_el is not None:
+                    _apply_tm_only(_b_el, _bp, ns)
+                else:
+                    _apply_tm_only(element, _bp, ns)
+        return
 
     # Handle __ITALIC_START__...__ITALIC_END__ spans
     if "__ITALIC_START__" in text:
@@ -203,54 +261,7 @@ def _apply_inline(element: etree._Element, text: str, ns: str,
     else:
         container = element
 
-    # Split on TM sentinels — the word before the sentinel is the tm content.
-    # Pattern: (text_before_word)(tm_word)__TM__(type)__(text_after)
-    # We use re.split on __TM__{type}__ to get alternating [text, type, text, type...]
-    parts = _re.split(r"__TM__([a-z]+)__", text)
-    # parts[0]   = text before first TM
-    # parts[1]   = first tm_type
-    # parts[2]   = text between first and second TM
-    # etc.
-
-    for i, part in enumerate(parts):
-        if i % 2 == 0:
-            # Plain text — but if next part is a TM type, extract last word into <tm>
-            is_last = (i == len(parts) - 1)
-            if not is_last:
-                # Next part is a TM type — extract last word of this segment
-                stripped = part.rstrip()
-                last_space = stripped.rfind(" ")
-                if last_space >= 0:
-                    pre_text  = stripped[:last_space + 1]  # text before tm word
-                    tm_word   = stripped[last_space + 1:]  # the tm word itself
-                else:
-                    pre_text  = ""
-                    tm_word   = stripped
-
-                # Emit pre_text as plain
-                if pre_text:
-                    _append_to(container, pre_text)
-
-                # The <tm> element will be emitted in the next (odd) iteration
-                # Store tm_word so the next iteration can use it
-                parts[i] = ""           # clear — already handled
-                parts[i + 1] = (tm_word, parts[i + 1])  # bundle (word, type)
-            else:
-                # Last segment — just plain text
-                if part:
-                    _append_to(container, part)
-        else:
-            # TM marker — may be (tm_word, type) tuple from above, or plain type string
-            if isinstance(part, tuple):
-                tm_word, tm_type = part
-            else:
-                tm_word = ""
-                tm_type = part
-
-            tm_el = etree.SubElement(container, _tag(ns, "tm"))
-            tm_el.set("tmtype", tm_type)
-            tm_el.text = tm_word if tm_word else None
-            tm_el.tail = ""
+    _apply_tm_only(container, text, ns)
 
 
 def _append_to(element: etree._Element, text: str) -> None:
@@ -638,7 +649,8 @@ class Generator:
                     xr_el = etree.SubElement(cmd_el, _tag(ns, "xref"))
                     xr_el.set("href", sb_href)
                     xr_el.set("scope", "external")
-                _safe_text(cmd_el, sb.get("text", ""))
+                _twb = sb.get("metadata", {}).get("text_with_bold", sb.get("text", ""))
+                _apply_inline(cmd_el, _twb, ns)
             step_buffer = []
 
         def flush_ul():
@@ -767,7 +779,8 @@ class Generator:
                     else:
                         xr_el.set("href", href)
                         xr_el.set("scope", "external")
-                _apply_inline(p_el, text, ns, bold=meta.get("bold", False))
+                _twb = meta.get("text_with_bold", text)
+                _apply_inline(p_el, _twb, ns, bold=meta.get("bold", False))
                 continue
 
             # ---- Menucascade ----
