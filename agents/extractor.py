@@ -788,6 +788,53 @@ def _extract_autonumbers(
     return result
 
 
+def _extract_links(
+    file_bytes: bytes,
+    page_indices: set | None,
+    log=None,
+) -> dict[tuple[int, float], str]:
+    """
+    Extract hyperlinks from PDF annotations using PyMuPDF.
+    Returns dict mapping (page_idx, y_mid) → uri string.
+    PyMuPDF stores links as annotations separate from font
+    text — extractable even when font encoding is unreadable.
+    """
+    def _log(msg):
+        if log is not None:
+            log.append(msg)
+    try:
+        import fitz
+    except ImportError:
+        return {}
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    except Exception as exc:
+        _log(f"[LINKS] ERROR: {exc}")
+        return {}
+
+    result: dict[tuple[int, float], str] = {}
+
+    for pg_idx, page in enumerate(doc):
+        if page_indices is not None and pg_idx not in page_indices:
+            continue
+        for link in page.get_links():
+            uri = link.get("uri", "")
+            if not uri:
+                continue
+            rect = link.get("from")
+            if rect is None:
+                continue
+            y_mid = round((rect.y0 + rect.y1) / 2, 0)
+            key   = (pg_idx, y_mid)
+            result[key] = uri
+            _log(f"[LINKS] pg={pg_idx} y={y_mid:.1f} "
+                 f"uri={uri[:60]!r}")
+
+    doc.close()
+    _log(f"[LINKS] total links found: {len(result)}")
+    return result
+
+
 def extract_pdf(
     file_bytes: bytes,
     page_range: str = "",
@@ -990,37 +1037,51 @@ def extract_pdf(
             for top_key in lines:
                 lines[top_key].sort(key=lambda w: w["x0"])
 
-            _line_tops = sorted(lines.keys())[:5]
-            _log(f"[YCHECK] pg={page_idx} first 5 tops: {_line_tops}")
-
             prev_para = None
             for top in sorted(lines):
                 word_group = lines[top]
 
-                # Assemble text preserving bold spans as sentinels for
-                # downstream menucascade detection
+                # Assemble text with __BOLD_START__/__BOLD_END__ and
+                # __ITALIC_START__/__ITALIC_END__ sentinels for downstream use.
                 parts = []
-                in_bold = False
+                in_bold   = False
+                in_italic = False
+
                 for w in word_group:
-                    w_bold = "Bold" in w.get("fontname", "")
-                    if w_bold and not in_bold:
-                        parts.append("__BOLD_START__")
-                        in_bold = True
-                    elif not w_bold and in_bold:
+                    fn     = w.get("fontname", "")
+                    w_bold = "Bold" in fn and "Italic" not in fn
+                    w_bi   = "Bold" in fn and "Italic" in fn
+                    w_ital = ("Italic" in fn or "Oblique" in fn) and "Bold" not in fn
+
+                    # Close open spans if style changes
+                    if in_bold and not w_bold and not w_bi:
                         parts.append("__BOLD_END__")
                         in_bold = False
+                    if in_italic and not w_ital and not w_bi:
+                        parts.append("__ITALIC_END__")
+                        in_italic = False
+
+                    # Open new spans
+                    if (w_bold or w_bi) and not in_bold:
+                        parts.append("__BOLD_START__")
+                        in_bold = True
+                    if (w_ital or w_bi) and not in_italic:
+                        parts.append("__ITALIC_START__")
+                        in_italic = True
+
                     parts.append(w["text"])
+
+                # Close any open spans
                 if in_bold:
                     parts.append("__BOLD_END__")
-                text = " ".join(p for p in parts
-                                if not p.startswith("__BOLD")).strip()
+                if in_italic:
+                    parts.append("__ITALIC_END__")
+
                 text_with_bold = " ".join(parts).strip()
+                text = re.sub(r"__(?:BOLD|ITALIC)_(?:START|END)__\s*", "",
+                              text_with_bold).strip()
 
-                if page_idx == 4 and "__BOLD_START__" in text_with_bold:
-                    _log(f"[BOLDCHECK] pg={page_idx} top={top:.1f} "
-                         f"text_with_bold={text_with_bold[:80]!r}")
-
-                # Detect if the entire line is bold (all words have Bold in fontname)
+                # Detect if the entire line is bold
                 line_is_bold = (
                     len(word_group) > 0
                     and all("Bold" in w.get("fontname", "") for w in word_group)
@@ -1029,12 +1090,6 @@ def extract_pdf(
                     not line_is_bold
                     and any("Bold" in w.get("fontname", "") for w in word_group)
                 )
-
-                for _w in word_group:
-                    _fn = _w.get("fontname", "")
-                    if ("Italic" in _fn or "Oblique" in _fn) and top < 740.0:
-                        _log(f"[ITALIC] pg={page_idx} top={top:.1f} "
-                             f"font={_fn!r} text={_w.get('text','')[:50]!r}")
 
                 if _should_drop(text):
                     dropped_count += 1
@@ -1088,7 +1143,12 @@ def extract_pdf(
                 blk = make_block(block_type, text, level=level)
                 if line_is_bold and block_type == "paragraph":
                     blk["metadata"]["bold"] = True
-                if block_type == "paragraph" and has_inline_bold:
+                # Store text_with_bold for inline markup rendering;
+                # skip note types — italic in notes is structural, not inline markup
+                if block_type in ("paragraph", "list_item") and (
+                    "__BOLD_START__" in text_with_bold
+                    or "__ITALIC_START__" in text_with_bold
+                ):
                     blk["metadata"]["text_with_bold"] = text_with_bold
                 # Store coordinates for PyMuPDF spatial join
                 blk["metadata"]["_page_idx_para"] = page_idx
@@ -1118,7 +1178,11 @@ def extract_pdf(
         _log(f"[AUTONUM] skipped: {_ae}")
 
     if _autonums:
+        _NOTE_TYPES = {"note_header", "note_inline"}
         for _blk in blocks:
+            # Never reclassify note content as a step
+            if _blk.get("type") in _NOTE_TYPES:
+                continue
             if _blk.get("type") != "paragraph":
                 continue
             _meta = _blk.get("metadata", {})
@@ -1137,6 +1201,29 @@ def extract_pdf(
                          f"original_type={_blk.get('type')} "
                          f"→ step {_autonums[_key]}: "
                          f"{_blk.get('text','')[:50]!r}")
+                    break
+
+    # Extract hyperlinks via PyMuPDF annotations
+    _links: dict[tuple[int, float], str] = {}
+    try:
+        import fitz  # noqa
+        _links = _extract_links(file_bytes, page_indices, log=debug_log)
+    except Exception as _le:
+        _log(f"[LINKS] skipped: {_le}")
+
+    if _links:
+        for _blk in blocks:
+            if _blk.get("type") not in ("paragraph", "list_item"):
+                continue
+            _meta = _blk.get("metadata", {})
+            _pg   = _meta.get("_page_idx_para")
+            _top  = _meta.get("_para_top")
+            if _pg is None or _top is None:
+                continue
+            for _dy in range(-15, 16):
+                _key = (_pg, round(_top + _dy, 0))
+                if _key in _links:
+                    _blk["metadata"]["href"] = _links[_key]
                     break
 
     # Clean up internal coordinate keys

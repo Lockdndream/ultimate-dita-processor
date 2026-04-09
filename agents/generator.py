@@ -171,6 +171,32 @@ def _apply_inline(element: etree._Element, text: str, ns: str,
         bold = True
         text = text[8:]
 
+    # Handle __ITALIC_START__...__ITALIC_END__ spans
+    if "__ITALIC_START__" in text:
+        _italic_parts = _re.split(
+            r"(__ITALIC_START__|__ITALIC_END__)", text
+        )
+        _in_italic = False
+        _i_el = None
+        # Strip __BOLD_START__/__BOLD_END__ from text before processing
+        _clean = _re.sub(r"__(?:BOLD)_(?:START|END)__\s*", "", text)
+        _italic_parts = _re.split(r"(__ITALIC_START__|__ITALIC_END__)", _clean)
+        _container = element
+        if bold:
+            _container = etree.SubElement(element, _tag(ns, "b"))
+        for _ip in _italic_parts:
+            if _ip == "__ITALIC_START__":
+                _in_italic = True
+                _i_el = etree.SubElement(_container, _tag(ns, "i"))
+            elif _ip == "__ITALIC_END__":
+                _in_italic = False
+            elif _ip:
+                if _in_italic and _i_el is not None:
+                    _append_to(_i_el, _ip)
+                else:
+                    _append_to(_container, _ip)
+        return   # handled — skip rest of function
+
     # Wrap in <b> if bold
     if bold:
         container = etree.SubElement(element, _tag(ns, "b"))
@@ -605,8 +631,13 @@ class Generator:
             steps_parent = body
             steps_el = etree.SubElement(steps_parent, _tag(ns, "steps"))
             for sb in step_buffer:
-                step_el = etree.SubElement(steps_el, _tag(ns, "step"))
-                cmd_el  = etree.SubElement(step_el, _tag(ns, "cmd"))
+                step_el  = etree.SubElement(steps_el, _tag(ns, "step"))
+                cmd_el   = etree.SubElement(step_el, _tag(ns, "cmd"))
+                sb_href  = sb.get("metadata", {}).get("href", "")
+                if sb_href:
+                    xr_el = etree.SubElement(cmd_el, _tag(ns, "xref"))
+                    xr_el.set("href", sb_href)
+                    xr_el.set("scope", "external")
                 _safe_text(cmd_el, sb.get("text", ""))
             step_buffer = []
 
@@ -725,7 +756,17 @@ class Generator:
             # ---- Paragraph ----
             if de == "p":
                 flush_all()
+                href = meta.get("href", "")
                 p_el = etree.SubElement(parent, _tag(ns, "p"))
+                if href:
+                    xr_el = etree.SubElement(p_el, _tag(ns, "xref"))
+                    if href.startswith("mailto:"):
+                        xr_el.set("href", href)
+                        xr_el.set("scope", "external")
+                        xr_el.set("format", "email")
+                    else:
+                        xr_el.set("href", href)
+                        xr_el.set("scope", "external")
                 _apply_inline(p_el, text, ns, bold=meta.get("bold", False))
                 continue
 
