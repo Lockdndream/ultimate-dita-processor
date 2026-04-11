@@ -9,9 +9,20 @@ brand_rules:
       - frontier
       - sprint
       - konnect
+      - GPU
+      - Global pumping unit
+      - Insite360
+      - adblue
+      - konect
+      - omnia
+      - pump control node
+      - vaportek
+      - PCN5
   gasboy:
     keywords:
       - atlas
+      - islander
+      - fleet solutions
       - atlasx
   angi:
     keywords:
@@ -41,6 +52,4 @@ matching_thresholds:
   dark_margin_ratio: 0.55
   watermark_keywords:
     - draft
-    - confidential
     - preliminary
-    - sample

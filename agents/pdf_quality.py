@@ -242,9 +242,45 @@ def _overall_status(checks: list[CheckResult]) -> str:
 def _footer_consistency_check(footers: list[FooterInfo], log: list[str]) -> CheckResult:
     findings: list[Finding] = []
     month_pages = [(f.page, f.month_year) for f in footers if f.month_year]
-    missing = [f for f in footers if f.has_footer_signal and not f.month_year]
+    NEAR_MONTH_RE = re.compile(r"\b([a-z]{3,12})\s+(\d{4})\b", re.IGNORECASE)
+    misspelled = []
+    for f in footers:
+        if f.has_footer_signal and not f.month_year:
+            for m in NEAR_MONTH_RE.finditer(f.footer_text):
+                word = m.group(1)
+                import difflib
+                close = difflib.get_close_matches(
+                    word.casefold(),
+                    [
+                        "january","february","march","april","may","june",
+                        "july","august","september","october","november","december",
+                        "jan","feb","mar","apr","jun","jul","aug","sep","sept","oct","nov","dec",
+                    ],
+                    n=1, cutoff=0.8,
+                )
+                if close:
+                    misspelled.append((f, m.group(0)))
+                    break
+    misspelled_pages = {f.page for f, _ in misspelled}
+    missing = [
+        f for f in footers
+        if f.has_footer_signal
+        and not f.month_year
+        and f.page not in misspelled_pages
+    ]
     distinct = sorted({m.casefold() for _, m in month_pages})
 
+    if misspelled:
+        status = "fail"
+    for footer, bad_word in misspelled:
+        findings.append(
+            Finding(
+                page=footer.page,
+                severity="error",
+                message=f'Footer month/year may contain a spelling error: "{bad_word}". Please check.',
+                evidence=footer.footer_text,
+            )
+        )
     for footer in missing:
         findings.append(
             Finding(
@@ -446,25 +482,67 @@ def _hash_distance(lhs: str, rhs: str) -> int:
 
 
 def _logo_refs_for_brand(brand: str) -> list[Path]:
+    # First try subdirectory structure
     brand_dir = LOGO_REFS_DIR / brand
-    if not brand_dir.is_dir():
-        return []
-    refs = []
-    for pattern in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
-        refs.extend(sorted(brand_dir.glob(pattern)))
-    return refs
+    if brand_dir.is_dir():
+        refs = []
+        for pattern in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+            refs.extend(sorted(brand_dir.glob(pattern)))
+        return refs
+    
+    # Fallback: look for {brand}.png in root
+    logo_file = LOGO_REFS_DIR / f"{brand}.png"
+    if logo_file.is_file():
+        return [logo_file]
+    
+    return []
 
 
-def _detect_expected_brand(doc_title: str, page_texts: list[tuple[int, str]], rules: dict, log: list[str]) -> str | None:
-    haystack = _normalize_text(doc_title + " " + " ".join(text for _, text in page_texts[:3]))
+# Dispenser brands take priority — Invenco is subordinate when co-present
+_DISPENSER_BRANDS = {"gilbarco", "gasboy"}
+
+def _detect_expected_brand(
+    doc_title: str,
+    page_texts: list[tuple[int, str]],
+    rules: dict,
+    log: list[str],
+) -> str | None:
+    haystack = _normalize_text(
+        doc_title + " " + " ".join(text for _, text in page_texts[:3])
+    )
     brand_rules = rules.get("brand_rules") or {}
+
+    matched: dict[str, str] = {}  # brand -> matched keyword
     for brand, meta in brand_rules.items():
         for keyword in meta.get("keywords", []):
             if _normalize_text(keyword) in haystack:
-                _log(log, f"[QUALITY] expected brand={brand} via keyword={keyword}")
-                return brand
-    _log(log, "[QUALITY] expected brand unresolved")
-    return None
+                matched[brand] = keyword
+                break  # first keyword match is enough per brand
+
+    if not matched:
+        _log(log, "[QUALITY] expected brand unresolved")
+        return None
+
+    dispenser_matches = {b: kw for b, kw in matched.items() if b in _DISPENSER_BRANDS}
+
+    if dispenser_matches:
+        if len(dispenser_matches) == 1:
+            brand = next(iter(dispenser_matches))
+        else:
+            brand = max(
+                dispenser_matches,
+                key=lambda b: sum(
+                    1 for kw in (brand_rules.get(b) or {}).get("keywords", [])
+                    if _normalize_text(kw) in haystack
+                ),
+            )
+        if "invenco" in matched:
+            _log(log, f"[QUALITY] invenco keywords present but subordinate to dispenser brand={brand}")
+    else:
+        brand = next(iter(matched))
+
+    _log(log, f"[QUALITY] expected brand={brand} via keyword={matched[brand]!r} all_matched={list(matched)}")
+    return brand
 
 
 def _region_color_mode(image_bytes: bytes) -> str:
@@ -501,65 +579,103 @@ def _brand_logo_check(doc, page_texts: list[tuple[int, str]], rules: dict, log: 
             summary="Could not determine the expected brand from document text.",
         )
 
-    page = doc[0]
-    rect = page.rect
-    header_clip = rect.__class__(0, 0, rect.width, rect.height * 0.22)
     dpi = int(((rules.get("ocr") or {}).get("dpi", 200)))
-    header_png = _render_region(doc, 1, header_clip, dpi)
-    region_mode = _region_color_mode(header_png)
-    refs = _logo_refs_for_brand(expected_brand)
+    lang = (rules.get("ocr") or {}).get("language", "eng")
+    ocr_ok = _ocr_available(rules, log)
+
     findings: list[Finding] = []
     status = "pass"
     summary_parts: list[str] = [f"Expected brand: {expected_brand}."]
 
-    if refs:
-        target_hash = _average_hash(header_png)
-        distances = []
-        for ref in refs:
-            try:
-                distances.append((ref.name, _hash_distance(target_hash, _average_hash(ref.read_bytes()))))
-            except Exception as exc:
-                _log(log, f"[QUALITY] failed to hash logo ref {ref.name}: {exc}")
-        if distances:
-            best_name, best_dist = min(distances, key=lambda item: item[1])
-            max_dist = int(((rules.get("matching_thresholds") or {}).get("logo_hash_max_distance", 18)))
-            if best_dist > max_dist:
-                status = "fail"
-                findings.append(
-                    Finding(
-                        page=1,
-                        severity="error",
-                        message="Header/logo region does not match the expected approved logo reference.",
-                        evidence=f"brand={expected_brand} ref={best_name} dist={best_dist}",
-                    )
-                )
-            summary_parts.append(f"Best logo match: {best_name} (distance {best_dist}).")
-    else:
-        status = "not_checked"
-        summary_parts.append("No reference logo assets are available yet for this brand.")
+    # ── First page — full top strip ───────────────────────────────────────────
+    first_page = doc[0]
+    first_rect = first_page.rect
+    header_clip = first_rect.__class__(0, 0, first_rect.width, first_rect.height * 0.22)
+    header_png = _render_region(doc, 1, header_clip, dpi)
+    region_mode = _region_color_mode(header_png)
 
-    tagline_required = " ".join((rules.get("required_taglines") or {}).get("all", []))
-    tagline_present = tagline_required and tagline_required in _normalize_text(" ".join(text for _, text in page_texts[:2]))
-    source = "pdf_text"
-    if not tagline_present and _ocr_available(rules, log):
-        source = "ocr"
-        ocr_text = _normalize_text(_ocr_image_bytes(header_png, (rules.get("ocr") or {}).get("language", "eng"), log))
-        tagline_present = bool(tagline_required and tagline_required in ocr_text)
-
-    if tagline_required:
-        if tagline_present:
-            summary_parts.append(f'"{tagline_required}" detected via {source}.')
+    if ocr_ok:
+        ocr_text = _normalize_text(_ocr_image_bytes(header_png, lang, log))
+        brand_found = expected_brand.casefold() in ocr_text
+        _log(log, f"[QUALITY] first-page logo OCR text={ocr_text!r} brand_found={brand_found}")
+        if brand_found:
+            summary_parts.append(f'First page: logo "{expected_brand}" confirmed via OCR.')
         else:
-            status = "fail" if status != "not_checked" else "warn"
+            status = "fail"
+            summary_parts.append(f'First page: logo "{expected_brand}" not detected in top header region.')
             findings.append(
                 Finding(
                     page=1,
-                    severity="error" if status == "fail" else "warning",
-                    message='Required "Powered by Vontier" tagline was not detected.',
-                    evidence=f"source={source}",
+                    severity="error",
+                    message=f'Expected brand name "{expected_brand}" not found in first page header.',
+                    evidence=f"ocr_text={ocr_text!r}",
+                )
+            )
+    else:
+        status = "not_checked"
+        summary_parts.append("OCR unavailable; first page logo check skipped.")
+
+    # ── Last page — bottom-left quadrant ─────────────────────────────────────
+    last_page_num = len(doc)
+    last_page = doc[last_page_num - 1]
+    last_rect = last_page.rect
+    last_clip = last_rect.__class__(
+        0,
+        last_rect.height * 0.78,
+        last_rect.width * 0.30,
+        last_rect.height,
+    )
+    last_png = _render_region(doc, last_page_num, last_clip, dpi)
+
+    if ocr_ok:
+        last_ocr = _normalize_text(_ocr_image_bytes(last_png, lang, log))
+        last_brand_found = expected_brand.casefold() in last_ocr
+        _log(log, f"[QUALITY] last-page logo OCR text={last_ocr!r} brand_found={last_brand_found}")
+        if last_brand_found:
+            summary_parts.append(f'Last page: logo "{expected_brand}" confirmed via OCR.')
+        else:
+            if status == "pass":
+                status = "fail"
+            summary_parts.append(f'Last page: logo "{expected_brand}" not detected in bottom-left region.')
+            findings.append(
+                Finding(
+                    page=last_page_num,
+                    severity="error",
+                    message=f'Expected brand name "{expected_brand}" not found in last page bottom-left.',
+                    evidence=f"ocr_text={last_ocr!r}",
                 )
             )
 
+    # ── Tagline check (first page + last page) ──────────────────────────────
+    tagline_required = " ".join((rules.get("required_taglines") or {}).get("all", []))
+
+    if tagline_required:
+        for _page_num, _page_label, _page_ocr_bytes in [
+            (1,            "First page", header_png),
+            (last_page_num, "Last page",  last_png),
+        ]:
+            _tagline_present = tagline_required in _normalize_text(
+                " ".join(text for _, text in page_texts[:2])
+            ) if _page_num == 1 else False
+            _source = "pdf_text" if _tagline_present else "ocr"
+            if not _tagline_present and ocr_ok:
+                _tagline_ocr = _normalize_text(_ocr_image_bytes(_page_ocr_bytes, lang, log))
+                _tagline_present = bool(tagline_required and tagline_required in _tagline_ocr)
+            if _tagline_present:
+                summary_parts.append(f'"{tagline_required}" detected on {_page_label} via {_source}.')
+            else:
+                if status not in {"not_checked"}:
+                    status = "fail"
+                findings.append(
+                    Finding(
+                        page=_page_num,
+                        severity="error" if status == "fail" else "warning",
+                        message=f'Required "Powered by Vontier" tagline not detected on {_page_label}.',
+                        evidence=f"source={_source}",
+                    )
+                )
+
+    # ── Color mode check ──────────────────────────────────────────────────────
     expected_mode = ((rules.get("logo_color_rules") or {}).get(expected_brand, {}) or {}).get("mode")
     if expected_mode == "monochrome" and region_mode not in {"monochrome", "unknown"}:
         if status == "pass":
@@ -573,6 +689,8 @@ def _brand_logo_check(doc, page_texts: list[tuple[int, str]], rules: dict, log: 
             )
         )
     elif expected_mode == "allow_blue" and region_mode not in {"blue", "color", "unknown"}:
+        if status == "pass":
+            status = "warn"
         findings.append(
             Finding(
                 page=1,
@@ -581,10 +699,8 @@ def _brand_logo_check(doc, page_texts: list[tuple[int, str]], rules: dict, log: 
                 evidence=f"detected_color_mode={region_mode}",
             )
         )
-        if status == "pass":
-            status = "warn"
 
-    _log(log, f"[QUALITY] brand/logo: {status} brand={expected_brand} color={region_mode} refs={len(refs)}")
+    _log(log, f"[QUALITY] brand/logo: {status} brand={expected_brand} color={region_mode}")
     return CheckResult(
         id="brand_logo",
         title="Brand Logo Check",
@@ -627,9 +743,17 @@ def _watermark_check(doc, rules: dict, log: list[str]) -> CheckResult:
 
     source = "pdf_text"
     if not findings and _ocr_available(rules, log):
-        dpi = int(((rules.get("ocr") or {}).get("dpi", 200)))
-        lang = (rules.get("ocr") or {}).get("language", "eng")
-        for page_num in range(1, len(doc) + 1):
+        _speed       = rules.get("_speed") or {}
+        dpi          = 100 if _speed.get("fast_dpi") else int(((rules.get("ocr") or {}).get("dpi", 200)))
+        lang         = (rules.get("ocr") or {}).get("language", "eng")
+        early_exit   = _speed.get("early_exit", False)
+        all_pages    = list(range(1, len(doc) + 1))
+        if _speed.get("sample_pages") and len(all_pages) > 6:
+            step       = max(1, len(all_pages) // 5)
+            scan_pages = sorted(set([all_pages[0], all_pages[-1]] + all_pages[1:-1:step]))
+        else:
+            scan_pages = all_pages
+        for page_num in scan_pages:
             page = doc[page_num - 1]
             ocr_text = _normalize_text(_ocr_image_bytes(_render_region(doc, page_num, page.rect, dpi), lang, log))
             for key in keywords:
@@ -638,7 +762,11 @@ def _watermark_check(doc, rules: dict, log: list[str]) -> CheckResult:
                     findings.append(
                         Finding(page=page_num, severity="info", message=f"Potential watermark detected via OCR keyword: {key}", evidence=key)
                     )
+                    if early_exit:
+                        break
                     break
+            if early_exit and findings:
+                break
 
     if findings:
         status = "pass"
@@ -701,10 +829,18 @@ def _change_bar_check(doc, rules: dict, log: list[str]) -> CheckResult:
                 break
 
     source = "vector"
-    if not candidate_pages:
-        dpi = int(((rules.get("ocr") or {}).get("dpi", 200)))
+    _speed = rules.get("_speed") or {}
+    if not candidate_pages and not _speed.get("skip_raster_change_bar"):
+        dpi        = 100 if _speed.get("fast_dpi") else int(((rules.get("ocr") or {}).get("dpi", 200)))
         dark_ratio = float(((rules.get("matching_thresholds") or {}).get("dark_margin_ratio", 0.55)))
-        for page_num in range(1, len(doc) + 1):
+        early_exit = _speed.get("early_exit", False)
+        all_pages  = list(range(1, len(doc) + 1))
+        if _speed.get("sample_pages") and len(all_pages) > 6:
+            step       = max(1, len(all_pages) // 5)
+            scan_pages = sorted(set([all_pages[0], all_pages[-1]] + all_pages[1:-1:step]))
+        else:
+            scan_pages = all_pages
+        for page_num in scan_pages:
             page = doc[page_num - 1]
             png = _render_region(doc, page_num, page.rect, dpi)
             if _has_dark_margin_bar(png, "left", dark_ratio) or _has_dark_margin_bar(png, "right", dark_ratio):
@@ -713,6 +849,8 @@ def _change_bar_check(doc, rules: dict, log: list[str]) -> CheckResult:
                 findings.append(
                     Finding(page=page_num, severity="info", message="Potential change bar detected from raster margin analysis.", evidence="dark margin stripe")
                 )
+                if early_exit:
+                    break
 
     if candidate_pages:
         status = "pass"
@@ -783,6 +921,11 @@ def check_pdf_quality(
     file_bytes: bytes,
     page_range: str = "",
     debug_log: list[str] | None = None,
+    progress_callback=None,
+    fast_dpi: bool = False,
+    skip_raster_change_bar: bool = False,
+    early_exit: bool = False,
+    sample_pages: bool = False,
 ) -> QualityReport:
     """
     Run document quality checks for a text-based PDF.
@@ -794,6 +937,13 @@ def check_pdf_quality(
     import pdfplumber  # type: ignore
 
     rules = _load_quality_rules(log)
+    rules["_speed"] = {
+        "fast_dpi":              fast_dpi,
+        "skip_raster_change_bar": skip_raster_change_bar,
+        "early_exit":            early_exit,
+        "sample_pages":          sample_pages,
+    }
+    _log(log, f"[QUALITY] speed options: fast_dpi={fast_dpi} skip_raster_change_bar={skip_raster_change_bar} early_exit={early_exit} sample_pages={sample_pages}")
     checks: list[CheckResult] = []
     footers: list[FooterInfo] = []
     page_texts: list[tuple[int, str]] = []
@@ -821,14 +971,25 @@ def check_pdf_quality(
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     try:
         if pages_checked:
-            checks.append(_footer_consistency_check(footers, log))
-            checks.append(_bookmark_footer_check(doc, footers, log))
-            checks.append(_brand_logo_check(doc, page_texts, rules, log))
-            checks.append(_straight_quotes_check(page_texts, log))
-            checks.append(_watermark_check(doc, rules, log))
-            checks.append(_change_bar_check(doc, rules, log))
-            checks.append(_even_page_count_check(len(pages_checked), log))
-            checks.append(_blank_page_notice_check(page_texts, pages_checked[-1], log))
+
+            _ORDERED_CHECKS = [
+                ("Footer Month/Year Consistency",    lambda: _footer_consistency_check(footers, log)),
+                ("Bookmark Title Matches Footer",     lambda: _bookmark_footer_check(doc, footers, log)),
+                ("Brand Logo Check",                  lambda: _brand_logo_check(doc, page_texts, rules, log)),
+                ("Curly Quotes Check",                lambda: _straight_quotes_check(page_texts, log)),
+                ("Watermark Check",                   lambda: _watermark_check(doc, rules, log)),
+                ("Change Bar Check",                  lambda: _change_bar_check(doc, rules, log)),
+                ("Even Page Count",                   lambda: _even_page_count_check(len(pages_checked), log)),
+                ("Blank Page Notice",                 lambda: _blank_page_notice_check(page_texts, pages_checked[-1], log)),
+            ]
+            _total = len(_ORDERED_CHECKS)
+            for _i, (_check_title, _check_fn) in enumerate(_ORDERED_CHECKS):
+                if progress_callback is not None:
+                    progress_callback(_i, _total, _check_title, None)
+                _result = _check_fn()
+                checks.append(_result)
+                if progress_callback is not None:
+                    progress_callback(_i, _total, _check_title, _result)
     finally:
         doc.close()
 

@@ -564,6 +564,43 @@ with left:
 
     st.divider()
 
+    if app_mode == "Check PDF Quality":
+        st.markdown(
+            '<div style="font-size:11px;color:#888;margin-bottom:6px;">'  
+            'Speed options</div>',
+            unsafe_allow_html=True,
+        )
+        _sc1, _sc2 = st.columns(2)
+        with _sc1:
+            opt_fast_dpi = st.checkbox(
+                "Lower DPI",
+                value=True,
+                help="Renders pages at 100 DPI instead of 200 DPI for watermark and change bar checks. "
+                     "Cuts render time by ~75%. May miss very small watermark text.",
+            )
+            opt_skip_raster = st.checkbox(
+                "Skip raster change bar",
+                value=True,
+                help="Skips the pixel-level margin scan for change bars and relies only on vector drawing "
+                     "detection. Much faster. Safe for most modern digital PDFs.",
+            )
+        with _sc2:
+            opt_early_exit = st.checkbox(
+                "Early exit",
+                value=True,
+                help="Stops scanning remaining pages as soon as the first watermark or change bar is found. "
+                     "Faster when these are present, no difference when absent.",
+            )
+            opt_sample_pages = st.checkbox(
+                "Sample pages",
+                value=False,
+                help="Checks ~5 evenly spaced pages instead of every page for watermark and change bar "
+                     "detection. Significantly faster on large documents. May miss isolated occurrences.",
+            )
+        st.divider()
+    else:
+        opt_fast_dpi = opt_skip_raster = opt_early_exit = opt_sample_pages = False
+
     run_button = st.button(
         "▶  Convert to DITA 2.0" if app_mode == "Convert to DITA" else "▶  Check PDF Quality",
         type="primary",
@@ -602,24 +639,110 @@ with right:
                 f"is_pdf: {is_pdf}  extract_images: {extract_images}  page_range: {page_range!r}",
             ]
             if app_mode == "Check PDF Quality":
-                _stage(ph_extractor, "QUALITY", "⏳", "Running PDF quality checks…")
-                report = check_pdf_quality(file_bytes, page_range=page_range, debug_log=debug_log)
+                debug_log.append(
+                    f"[SPEED] fast_dpi={opt_fast_dpi} skip_raster_change_bar={opt_skip_raster} "
+                    f"early_exit={opt_early_exit} sample_pages={opt_sample_pages}"
+                )
+                _QUALITY_CHECK_LABELS = [
+                    "Footer Month/Year Consistency",
+                    "Bookmark Title Matches Footer",
+                    "Brand Logo Check",
+                    "Curly Quotes Check",
+                    "Watermark Check",
+                    "Change Bar Check",
+                    "Even Page Count",
+                    "Blank Page Notice",
+                ]
+                _TOTAL_CHECKS = len(_QUALITY_CHECK_LABELS)
+                _STATUS_ICONS = {
+                    "pass":        "✅",
+                    "fail":        "❌",
+                    "warn":        "⚠️",
+                    "not_checked": "⏭️",
+                }
+                _RESULT_MSGS = {
+                    "pass":        "looks good.",
+                    "fail":        "failed.",
+                    "warn":        "has warnings.",
+                    "not_checked": "was skipped.",
+                }
+
+                _ph_header   = st.empty()
+                _ph_rows     = [st.empty() for _ in range(_TOTAL_CHECKS)]
+                _ph_results  = [st.empty() for _ in range(_TOTAL_CHECKS)]
+
+                def _draw_progress(idx, total, title, result):
+                    _ph_header.markdown(
+                        f"**Running quality checks…** &nbsp; `{idx + (1 if result else 0)}/{total}`"
+                    )
+                    if result is None:
+                        _ph_rows[idx].markdown(
+                            f"&nbsp;&nbsp;⏳ `{idx + 1}/{total}` &nbsp; Checking **{title}**…"
+                        )
+                    else:
+                        icon = _STATUS_ICONS.get(result.status, "⏭️")
+                        msg  = _RESULT_MSGS.get(result.status, "done.")
+                        _ph_rows[idx].markdown(
+                            f"&nbsp;&nbsp;{icon} `{idx + 1}/{total}` &nbsp; "
+                            f"**{title}** — {msg}"
+                        )
+                        with _ph_results[idx].container():
+                            with st.expander(
+                                f"{result.title} · {result.status.upper()}",
+                                expanded=(result.status != "pass"),
+                            ):
+                                st.markdown(_quality_badge(result.status), unsafe_allow_html=True)
+                                st.write(result.summary)
+                                if result.findings:
+                                    for finding in result.findings:
+                                        prefix = f"Page {finding.page}: " if finding.page is not None else ""
+                                        body   = prefix + finding.message
+                                        if finding.evidence:
+                                            body = body + chr(10) + chr(10) + "Evidence: " + finding.evidence
+                                        if finding.severity == "error":
+                                            st.error(body)
+                                        elif finding.severity == "warning":
+                                            st.warning(body)
+                                        else:
+                                            st.info(body)
+                                else:
+                                    st.success("No page-level findings for this check.")
+
+                report = check_pdf_quality(
+                    file_bytes,
+                    page_range=page_range,
+                    debug_log=debug_log,
+                    progress_callback=_draw_progress,
+                    fast_dpi=opt_fast_dpi,
+                    skip_raster_change_bar=opt_skip_raster,
+                    early_exit=opt_early_exit,
+                    sample_pages=opt_sample_pages,
+                )
                 elapsed = time.time() - t0
                 flagged = sum(1 for check in report.checks if check.status in {"fail", "warn"})
-                _stage(
-                    ph_extractor,
-                    "QUALITY",
-                    "✅" if report.overall_status == "pass" else "⚠️",
-                    f"{len(report.checks)} checks · {flagged} flagged · {elapsed:.2f}s",
+
+                _ph_header.markdown(
+                    f'{"✅" if report.overall_status == "pass" else "⚠️"} '
+                    f"**Quality check complete** — "
+                    f"`{len(report.checks)}` checks · `{flagged}` flagged · `{elapsed:.2f}s`"
                 )
-                _log_path = _ROOT / "dita_converter_debug.log"
-                _log_path.write_text("\n".join(debug_log), encoding="utf-8")
-                st.session_state.results = {
-                    "kind": "quality",
-                    "report": report,
-                    "source_name": file_name,
-                    "elapsed": elapsed,
-                }
+
+                # Render metrics and debug log inline — no session state needed
+                st.divider()
+                _mc1, _mc2, _mc3 = st.columns(3)
+                _mc1.metric("Pages checked", report.page_count)
+                _mc2.metric("Checks", len(report.checks))
+                _mc3.metric("Flagged", flagged)
+                with st.expander("🪲 Debug Log"):
+                    _log_text = "\n".join(debug_log) if debug_log else "(no log)"
+                    st.code(_log_text, language="text")
+                    st.download_button(
+                        "⬇ Download quality log",
+                        data=_log_text.encode("utf-8"),
+                        file_name="pdf_quality_debug.log",
+                        mime="text/plain",
+                    )
+                st.session_state.results = None
             else:
                 debug_log.append(f"is_bookmap: {is_bookmap}")
                 _stage(ph_extractor, "EXTRACTOR", "⏳", "Parsing document…")

@@ -6,6 +6,23 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/).
 
 ---
 
+## [1.1.0] — 2026-04-11 — PDF Quality Enhancement
+
+### Added
+- Hybrid PDF-quality logic in `pdf_quality.py`
+- Editable brand/logo rules in `pdf_quality_rules.yaml`
+- Placeholder location for approved logo assets in `config/logo_refs/README.md`
+
+### Features
+- Configurable brand rules for Invenco, Gilbarco, Gasboy, and Angi
+- Required "Powered by Vontier" detection
+- Logo color expectation checks
+- Optional OCR fallback when local Tesseract is available
+- Logo reference matching hooks that activate once logo images are added
+- Raster fallback for change-bar detection and OCR fallback for watermark/tagline detection
+
+---
+
 ## [1.0.0] — 2026-03-14 — Proof of Concept Release
 
 ### S-07 — Integration & Handoff

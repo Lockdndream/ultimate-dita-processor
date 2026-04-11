@@ -44,3 +44,10 @@ desktop.ini
 todita_*/
 main
 claude_code_prompt_v3.md
+AGENTS.md
+agents/pdf_quality.py.bak
+config/logo_refs/gasboy.png
+config/logo_refs/gilbarco.png
+config/logo_refs/invenco.png
+fix.py
+ui/app.py.bak
