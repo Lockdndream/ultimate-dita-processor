@@ -574,61 +574,59 @@ def _region_color_mode(image_bytes: bytes) -> str:
     return "monochrome"
 
 
-def _match_logo_to_brand(
-    image_bytes: bytes,
-    rules: dict,
-    log: list[str],
-) -> str:
+def _brand_above_vontier(image_bytes: bytes, lang: str, log: list[str]) -> str:
     """
-    Compare extracted logo region against reference images
-    using average hash (aHash). Returns the best matching
-    brand name or "" if no match is close enough.
+    Use pytesseract word-level data to find the text on the
+    line immediately above "Powered by Vontier".
 
-    aHash is robust to minor scaling, compression artefacts,
-    and small rendering differences — ideal for logo matching.
+    Returns the detected brand name text (lowercased, stripped)
+    or "" if not found.
     """
-    if not LOGO_REFS_DIR.is_dir():
-        _log(log, "[QUALITY] logo_refs dir missing — skipping image match")
-        return ""
-
     try:
+        import pytesseract
         from PIL import Image as _Image
-        candidate = _Image.open(io.BytesIO(image_bytes)).convert("L")
-        candidate = candidate.resize((64, 64))
-        c_pixels  = list(candidate.getdata())
-        c_avg     = sum(c_pixels) / len(c_pixels)
-        c_hash    = "".join("1" if p >= c_avg else "0" for p in c_pixels)
+        img = _Image.open(io.BytesIO(image_bytes))
+        data = pytesseract.image_to_data(
+            img,
+            lang=lang,
+            output_type=pytesseract.Output.DICT,
+        )
     except Exception as exc:
-        _log(log, f"[QUALITY] candidate hash failed: {exc}")
+        _log(log, f"[QUALITY] pytesseract word data failed: {exc}")
         return ""
 
-    best_brand    = ""
-    best_distance = 999
-    threshold     = int(
-        ((rules.get("matching_thresholds") or {}).get("logo_hash_max_distance", 20))
-    )
+    # Collect words with their top Y coordinate
+    words = [
+        {
+            "text": data["text"][i].strip(),
+            "top":  data["top"][i],
+            "conf": int(data["conf"][i]),
+        }
+        for i in range(len(data["text"]))
+        if data["text"][i].strip() and int(data["conf"][i]) > 20
+    ]
 
-    for ref_path in sorted(LOGO_REFS_DIR.glob("*.png")):
-        brand_name = ref_path.stem.lower()
-        try:
-            ref = _Image.open(ref_path).convert("L").resize((64, 64))
-            r_pixels = list(ref.getdata())
-            r_avg    = sum(r_pixels) / len(r_pixels)
-            r_hash   = "".join("1" if p >= r_avg else "0" for p in r_pixels)
-            distance = sum(a != b for a, b in zip(c_hash, r_hash))
-            _log(log, f"[QUALITY] logo hash distance brand={brand_name} distance={distance}")
-            if distance < best_distance:
-                best_distance = distance
-                best_brand    = brand_name
-        except Exception as exc:
-            _log(log, f"[QUALITY] ref hash failed for {ref_path.name}: {exc}")
+    # Find Y of "Powered" (start of "Powered by Vontier")
+    vontier_top = None
+    for w in words:
+        if w["text"].lower() in ("powered", "vontier"):
+            vontier_top = w["top"]
+            break
 
-    if best_distance <= threshold:
-        _log(log, f"[QUALITY] logo matched brand={best_brand} distance={best_distance}")
-        return best_brand
+    if vontier_top is None:
+        _log(log, "[QUALITY] 'Powered by Vontier' not found in word data")
+        return ""
 
-    _log(log, f"[QUALITY] no logo match within threshold={threshold} best={best_brand} distance={best_distance}")
-    return ""
+    # Collect words on the line immediately above — within 40px above
+    # and no more than 80px above vontier_top
+    above_words = [
+        w["text"] for w in words
+        if vontier_top - 80 <= w["top"] < vontier_top - 5
+    ]
+
+    brand_text = " ".join(above_words).strip().lower()
+    _log(log, f"[QUALITY] text above 'Powered by Vontier': {brand_text!r}")
+    return brand_text
 
 
 def _brand_logo_check(doc, footers: list[FooterInfo], page_texts: list[tuple[int, str]], rules: dict, log: list[str]) -> CheckResult:
@@ -669,30 +667,26 @@ def _brand_logo_check(doc, footers: list[FooterInfo], page_texts: list[tuple[int
     header_png = _render_region(doc, 1, header_clip, dpi)
     region_mode = _region_color_mode(header_png)
 
-    detected_brand = _match_logo_to_brand(header_png, rules, log)
-    brand_found = bool(detected_brand and detected_brand == expected_brand.casefold())
-    _log(log, f"[QUALITY] first page logo match: detected={detected_brand!r} expected={expected_brand!r} brand_found={brand_found}")
-
-    if not brand_found and not detected_brand:
-        # No reference matched — fall back to OCR if available
-        if ocr_ok:
-            ocr_text = _normalize_text(_ocr_image_bytes(header_png, lang, log))
-            brand_found = expected_brand.casefold() in ocr_text
-            _log(log, f"[QUALITY] OCR fallback first page: {ocr_text[:80]!r} brand_found={brand_found}")
-
-    if brand_found:
-        summary_parts.append(f'First page: logo "{expected_brand}" confirmed.')
-    else:
-        status = "fail"
-        summary_parts.append(f'First page: logo "{expected_brand}" not detected in top header region.')
-        findings.append(
-            Finding(
-                page=1,
-                severity="error",
-                message=f'Expected brand name "{expected_brand}" not found in first page header.',
-                evidence=f"detected={detected_brand!r}",
+    if ocr_ok:
+        brand_above = _brand_above_vontier(header_png, lang, log)
+        brand_found = bool(brand_above and expected_brand.casefold() in brand_above)
+        _log(log, f"[QUALITY] text above vontier on first page: {brand_above!r} brand_found={brand_found}")
+        if brand_found:
+            summary_parts.append(f'First page: logo "{expected_brand}" confirmed via OCR.')
+        else:
+            status = "fail"
+            summary_parts.append(f'First page: logo "{expected_brand}" not detected in top header region.')
+            findings.append(
+                Finding(
+                    page=1,
+                    severity="error",
+                    message=f'Expected brand name "{expected_brand}" not found in first page header.',
+                    evidence=f"brand_above={brand_above!r}",
+                )
             )
-        )
+    else:
+        status = "not_checked"
+        summary_parts.append("OCR unavailable; first page logo check skipped.")
 
     # ── Last page — bottom-left quadrant ─────────────────────────────────────
     last_page_num = len(doc)
@@ -706,30 +700,24 @@ def _brand_logo_check(doc, footers: list[FooterInfo], page_texts: list[tuple[int
     )
     last_png = _render_region(doc, last_page_num, last_clip, dpi)
 
-    last_detected = _match_logo_to_brand(last_png, rules, log)
-    last_brand_found = bool(last_detected and last_detected == expected_brand.casefold())
-    _log(log, f"[QUALITY] last page logo match: detected={last_detected!r} expected={expected_brand!r} brand_found={last_brand_found}")
-
-    if not last_brand_found and not last_detected:
-        if ocr_ok:
-            last_ocr = _normalize_text(_ocr_image_bytes(last_png, lang, log))
-            last_brand_found = expected_brand.casefold() in last_ocr
-            _log(log, f"[QUALITY] OCR fallback last page: {last_ocr[:80]!r} brand_found={last_brand_found}")
-
-    if last_brand_found:
-        summary_parts.append(f'Last page: logo "{expected_brand}" confirmed.')
-    else:
-        if status == "pass":
-            status = "fail"
-        summary_parts.append(f'Last page: logo "{expected_brand}" not detected in bottom-left region.')
-        findings.append(
-            Finding(
-                page=last_page_num,
-                severity="error",
-                message=f'Expected brand name "{expected_brand}" not found in last page bottom-left.',
-                evidence=f"detected={last_detected!r}",
+    if ocr_ok:
+        last_brand_above = _brand_above_vontier(last_png, lang, log)
+        last_brand_found = bool(last_brand_above and expected_brand.casefold() in last_brand_above)
+        _log(log, f"[QUALITY] text above vontier on last page: {last_brand_above!r} brand_found={last_brand_found}")
+        if last_brand_found:
+            summary_parts.append(f'Last page: logo "{expected_brand}" confirmed via OCR.')
+        else:
+            if status == "pass":
+                status = "fail"
+            summary_parts.append(f'Last page: logo "{expected_brand}" not detected in bottom-left region.')
+            findings.append(
+                Finding(
+                    page=last_page_num,
+                    severity="error",
+                    message=f'Expected brand name "{expected_brand}" not found in last page bottom-left.',
+                    evidence=f"brand_above={last_brand_above!r}",
+                )
             )
-        )
 
     # ── Tagline check (first page + last page) ──────────────────────────────
     tagline_required = " ".join((rules.get("required_taglines") or {}).get("all", []))
