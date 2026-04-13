@@ -574,61 +574,6 @@ def _region_color_mode(image_bytes: bytes) -> str:
     return "monochrome"
 
 
-def _brand_above_vontier(image_bytes: bytes, lang: str, log: list[str]) -> str:
-    """
-    Use pytesseract word-level data to find the text on the
-    line immediately above "Powered by Vontier".
-
-    Returns the detected brand name text (lowercased, stripped)
-    or "" if not found.
-    """
-    try:
-        import pytesseract
-        from PIL import Image as _Image
-        img = _Image.open(io.BytesIO(image_bytes))
-        data = pytesseract.image_to_data(
-            img,
-            lang=lang,
-            output_type=pytesseract.Output.DICT,
-        )
-    except Exception as exc:
-        _log(log, f"[QUALITY] pytesseract word data failed: {exc}")
-        return ""
-
-    # Collect words with their top Y coordinate
-    words = [
-        {
-            "text": data["text"][i].strip(),
-            "top":  data["top"][i],
-            "conf": int(data["conf"][i]),
-        }
-        for i in range(len(data["text"]))
-        if data["text"][i].strip() and int(data["conf"][i]) > 20
-    ]
-
-    # Find Y of "Powered" (start of "Powered by Vontier")
-    vontier_top = None
-    for w in words:
-        if w["text"].lower() in ("powered", "vontier"):
-            vontier_top = w["top"]
-            break
-
-    if vontier_top is None:
-        _log(log, "[QUALITY] 'Powered by Vontier' not found in word data")
-        return ""
-
-    # Collect words on the line immediately above — within 40px above
-    # and no more than 80px above vontier_top
-    above_words = [
-        w["text"] for w in words
-        if vontier_top - 80 <= w["top"] < vontier_top - 5
-    ]
-
-    brand_text = " ".join(above_words).strip().lower()
-    _log(log, f"[QUALITY] text above 'Powered by Vontier': {brand_text!r}")
-    return brand_text
-
-
 def _brand_logo_check(doc, footers: list[FooterInfo], page_texts: list[tuple[int, str]], rules: dict, log: list[str]) -> CheckResult:
     # Use the footer title from page 1 — same source as bookmark check.
     # Fall back to TOC title only if footer title is unavailable.
@@ -668,9 +613,9 @@ def _brand_logo_check(doc, footers: list[FooterInfo], page_texts: list[tuple[int
     region_mode = _region_color_mode(header_png)
 
     if ocr_ok:
-        brand_above = _brand_above_vontier(header_png, lang, log)
-        brand_found = bool(brand_above and expected_brand.casefold() in brand_above)
-        _log(log, f"[QUALITY] text above vontier on first page: {brand_above!r} brand_found={brand_found}")
+        ocr_text = _normalize_text(_ocr_image_bytes(header_png, lang, log))
+        brand_found = expected_brand.casefold() in ocr_text
+        _log(log, f"[QUALITY] first-page logo OCR text={ocr_text!r} brand_found={brand_found}")
         if brand_found:
             summary_parts.append(f'First page: logo "{expected_brand}" confirmed via OCR.')
         else:
@@ -681,7 +626,7 @@ def _brand_logo_check(doc, footers: list[FooterInfo], page_texts: list[tuple[int
                     page=1,
                     severity="error",
                     message=f'Expected brand name "{expected_brand}" not found in first page header.',
-                    evidence=f"brand_above={brand_above!r}",
+                    evidence=f"ocr_text={ocr_text!r}",
                 )
             )
     else:
@@ -701,9 +646,9 @@ def _brand_logo_check(doc, footers: list[FooterInfo], page_texts: list[tuple[int
     last_png = _render_region(doc, last_page_num, last_clip, dpi)
 
     if ocr_ok:
-        last_brand_above = _brand_above_vontier(last_png, lang, log)
-        last_brand_found = bool(last_brand_above and expected_brand.casefold() in last_brand_above)
-        _log(log, f"[QUALITY] text above vontier on last page: {last_brand_above!r} brand_found={last_brand_found}")
+        last_ocr = _normalize_text(_ocr_image_bytes(last_png, lang, log))
+        last_brand_found = expected_brand.casefold() in last_ocr
+        _log(log, f"[QUALITY] last-page logo OCR text={last_ocr!r} brand_found={last_brand_found}")
         if last_brand_found:
             summary_parts.append(f'Last page: logo "{expected_brand}" confirmed via OCR.')
         else:
@@ -715,7 +660,7 @@ def _brand_logo_check(doc, footers: list[FooterInfo], page_texts: list[tuple[int
                     page=last_page_num,
                     severity="error",
                     message=f'Expected brand name "{expected_brand}" not found in last page bottom-left.',
-                    evidence=f"brand_above={last_brand_above!r}",
+                    evidence=f"ocr_text={last_ocr!r}",
                 )
             )
 
