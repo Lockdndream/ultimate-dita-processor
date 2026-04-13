@@ -17,9 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-import gc
 
-import time
 import yaml
 
 from agents.extractor import ExtractorError, _is_blank_page, _parse_page_range
@@ -129,11 +127,7 @@ def _meaningful_footer_lines(text: str) -> list[str]:
 
 def _extract_footer_lines(page) -> list[str]:
     height = float(page.height or 0)
-    width  = float(page.width  or 0)
-    # Crop to footer strip before extract_words so pdfplumber
-    # does not parse image data from the full page
-    footer_band = page.crop((0, height * 0.88, width, height))
-    words = footer_band.extract_words(
+    words = page.extract_words(
         x_tolerance=3,
         y_tolerance=3,
         keep_blank_chars=False,
@@ -448,9 +442,7 @@ def _render_region(doc, page_num: int, clip, dpi: int) -> bytes:
     page = doc[page_num - 1]
     scale = dpi / 72.0
     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False)
-    data = pix.tobytes("png")
-    pix = None
-    return data
+    return pix.tobytes("png")
 
 
 def _ocr_image_bytes(image_bytes: bytes, lang: str, log: list[str]) -> str:
@@ -511,12 +503,13 @@ _DISPENSER_BRANDS = {"gilbarco", "gasboy"}
 
 def _detect_expected_brand(
     doc_title: str,
+    page_texts: list[tuple[int, str]],
     rules: dict,
     log: list[str],
 ) -> str | None:
-    # Brand keyword matching runs against the footer title ONLY.
-    # Do not include page body text — it causes false matches.
-    haystack = _normalize_text(doc_title)
+    haystack = _normalize_text(
+        doc_title + " " + " ".join(text for _, text in page_texts[:3])
+    )
     brand_rules = rules.get("brand_rules") or {}
 
     matched: dict[str, str] = {}  # brand -> matched keyword
@@ -574,21 +567,10 @@ def _region_color_mode(image_bytes: bytes) -> str:
     return "monochrome"
 
 
-def _brand_logo_check(doc, footers: list[FooterInfo], page_texts: list[tuple[int, str]], rules: dict, log: list[str]) -> CheckResult:
-    # Use the footer title from page 1 — same source as bookmark check.
-    # Fall back to TOC title only if footer title is unavailable.
-    footer_title = next(
-        (f.title_text for f in footers if f.page == 1 and f.title_text),
-        ""
-    )
-    if not footer_title:
-        footer_titles = [f.title_text for f in footers if f.title_text]
-        footer_title = Counter(footer_titles).most_common(1)[0][0] if footer_titles else ""
-    if not footer_title:
-        toc = doc.get_toc(simple=True)
-        footer_title = toc[0][1].strip() if toc else ""
-    _log(log, f"[QUALITY] brand detection using title={footer_title!r}")
-    expected_brand = _detect_expected_brand(footer_title, rules, log)
+def _brand_logo_check(doc, page_texts: list[tuple[int, str]], rules: dict, log: list[str]) -> CheckResult:
+    toc = doc.get_toc(simple=True)
+    doc_title = toc[0][1].strip() if toc else (page_texts[0][1].splitlines()[0] if page_texts and page_texts[0][1] else "")
+    expected_brand = _detect_expected_brand(doc_title, page_texts, rules, log)
     if not expected_brand:
         return CheckResult(
             id="brand_logo",
@@ -731,11 +713,7 @@ def _brand_logo_check(doc, footers: list[FooterInfo], page_texts: list[tuple[int
 def _watermark_check(doc, rules: dict, log: list[str]) -> CheckResult:
     findings = []
     keywords = tuple((rules.get("matching_thresholds") or {}).get("watermark_keywords", list(DEFAULT_WATERMARK_KEYWORDS)))
-    _speed = rules.get("_speed") or {}
-    _sub = (_speed.get("sub_progress") or (lambda d: None))
-    _total_pages = len(doc)
-    for page_num in range(1, _total_pages + 1):
-        _sub(f"reading page {page_num}/{_total_pages}")
+    for page_num in range(1, len(doc) + 1):
         page = doc[page_num - 1]
         try:
             page_dict = page.get_text("dict")
@@ -775,13 +753,9 @@ def _watermark_check(doc, rules: dict, log: list[str]) -> CheckResult:
             scan_pages = sorted(set([all_pages[0], all_pages[-1]] + all_pages[1:-1:step]))
         else:
             scan_pages = all_pages
-        _sub = (_speed.get("sub_progress") or (lambda d: None))
         for page_num in scan_pages:
-            _sub(f"scanning page {page_num}/{len(doc)}")
             page = doc[page_num - 1]
-            _img = _render_region(doc, page_num, page.rect, dpi)
-            ocr_text = _normalize_text(_ocr_image_bytes(_img, lang, log))
-            _img = None
+            ocr_text = _normalize_text(_ocr_image_bytes(_render_region(doc, page_num, page.rect, dpi), lang, log))
             for key in keywords:
                 if _normalize_text(key) in ocr_text:
                     source = "ocr"
@@ -833,11 +807,7 @@ def _has_dark_margin_bar(image_bytes: bytes, side: str, threshold: float) -> boo
 def _change_bar_check(doc, rules: dict, log: list[str]) -> CheckResult:
     findings = []
     candidate_pages = set()
-    _speed = rules.get("_speed") or {}
-    _sub = (_speed.get("sub_progress") or (lambda d: None))
-    _total_pages = len(doc)
-    for page_num in range(1, _total_pages + 1):
-        _sub(f"checking vectors page {page_num}/{_total_pages}")
+    for page_num in range(1, len(doc) + 1):
         page = doc[page_num - 1]
         page_rect = page.rect
         try:
@@ -864,15 +834,16 @@ def _change_bar_check(doc, rules: dict, log: list[str]) -> CheckResult:
         dpi        = 100 if _speed.get("fast_dpi") else int(((rules.get("ocr") or {}).get("dpi", 200)))
         dark_ratio = float(((rules.get("matching_thresholds") or {}).get("dark_margin_ratio", 0.55)))
         early_exit = _speed.get("early_exit", False)
-        scan_pages = list(range(1, len(doc) + 1))
-        _sub = (_speed.get("sub_progress") or (lambda d: None))
+        all_pages  = list(range(1, len(doc) + 1))
+        if _speed.get("sample_pages") and len(all_pages) > 6:
+            step       = max(1, len(all_pages) // 5)
+            scan_pages = sorted(set([all_pages[0], all_pages[-1]] + all_pages[1:-1:step]))
+        else:
+            scan_pages = all_pages
         for page_num in scan_pages:
-            _sub(f"scanning page {page_num}/{len(doc)}")
             page = doc[page_num - 1]
             png = _render_region(doc, page_num, page.rect, dpi)
-            _hit = _has_dark_margin_bar(png, "left", dark_ratio) or _has_dark_margin_bar(png, "right", dark_ratio)
-            png = None
-            if _hit:
+            if _has_dark_margin_bar(png, "left", dark_ratio) or _has_dark_margin_bar(png, "right", dark_ratio):
                 source = "raster"
                 candidate_pages.add(page_num)
                 findings.append(
@@ -971,56 +942,31 @@ def check_pdf_quality(
         "skip_raster_change_bar": skip_raster_change_bar,
         "early_exit":            early_exit,
         "sample_pages":          sample_pages,
-        "sub_progress":          None,
     }
     _log(log, f"[QUALITY] speed options: fast_dpi={fast_dpi} skip_raster_change_bar={skip_raster_change_bar} early_exit={early_exit} sample_pages={sample_pages}")
     checks: list[CheckResult] = []
     footers: list[FooterInfo] = []
     page_texts: list[tuple[int, str]] = []
 
-    _extract_start = time.time()
-    import fitz as _fitz_pre  # type: ignore
-
-    # Phase 1 — fast text extraction via fitz (handles image-heavy pages well)
-    _fitz_doc = _fitz_pre.open(stream=file_bytes, filetype="pdf")
-    total_pages = len(_fitz_doc)
-    page_indices = _parse_page_range(page_range, total_pages)
-    pages_checked = (
-        [idx + 1 for idx in sorted(page_indices)]
-        if page_indices is not None
-        else list(range(1, total_pages + 1))
-    )
-    total_chars = 0
-    _fitz_texts: dict[int, str] = {}
-    for zero_idx in range(total_pages):
-        page_num = zero_idx + 1
-        if progress_callback is not None:
-            progress_callback(-1, total_pages, "Pre-extraction", None, detail=f"extracting text page {page_num}/{total_pages}")
-        _fpage = _fitz_doc[zero_idx]
-        text = _fpage.get_text("text") or ""
-        total_chars += len(text)
-        _fitz_texts[page_num] = text
-    _fitz_doc.close()
-
-    if total_chars < 50:
-        raise ExtractorError(
-            "No extractable text found. This appears to be a scanned PDF. "
-            "Please supply a text-based (digital) PDF."
-        )
-
-    # Phase 2 — footer extraction via pdfplumber (needs extract_words bounding boxes)
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        total_pages = len(pdf.pages)
+        total_chars = sum(len(page.extract_text() or "") for page in pdf.pages)
+        if total_chars < 50:
+            raise ExtractorError(
+                "No extractable text found. This appears to be a scanned PDF. "
+                "Please supply a text-based (digital) PDF."
+            )
+
+        page_indices = _parse_page_range(page_range, total_pages)
+        pages_checked = [idx + 1 for idx in sorted(page_indices)] if page_indices is not None else list(range(1, total_pages + 1))
+
         for zero_idx, page in enumerate(pdf.pages):
-            page_num = zero_idx + 1
             if page_indices is not None and zero_idx not in page_indices:
                 continue
-            if progress_callback is not None:
-                progress_callback(-1, total_pages, "Pre-extraction", None, detail=f"extracting footer page {page_num}/{total_pages}")
-            page_texts.append((page_num, _fitz_texts.get(page_num, "")))
+            page_num = zero_idx + 1
+            text = page.extract_text() or ""
+            page_texts.append((page_num, text))
             footers.append(_extract_footer_info(page, page_num))
-
-    _extract_elapsed = time.time() - _extract_start
-    _log(log, f"[QUALITY] pre-extraction complete: {total_pages} pages in {_extract_elapsed:.2f}s")
 
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     try:
@@ -1029,7 +975,7 @@ def check_pdf_quality(
             _ORDERED_CHECKS = [
                 ("Footer Month/Year Consistency",    lambda: _footer_consistency_check(footers, log)),
                 ("Bookmark Title Matches Footer",     lambda: _bookmark_footer_check(doc, footers, log)),
-                ("Brand Logo Check",                  lambda: _brand_logo_check(doc, footers, page_texts, rules, log)),
+                ("Brand Logo Check",                  lambda: _brand_logo_check(doc, page_texts, rules, log)),
                 ("Curly Quotes Check",                lambda: _straight_quotes_check(page_texts, log)),
                 ("Watermark Check",                   lambda: _watermark_check(doc, rules, log)),
                 ("Change Bar Check",                  lambda: _change_bar_check(doc, rules, log)),
@@ -1040,15 +986,8 @@ def check_pdf_quality(
             for _i, (_check_title, _check_fn) in enumerate(_ORDERED_CHECKS):
                 if progress_callback is not None:
                     progress_callback(_i, _total, _check_title, None)
-                if progress_callback is not None:
-                    def _make_sub(i=_i, t=_check_title):
-                        def _sub(detail: str):
-                            progress_callback(_i, _total, t, None, detail=detail)
-                        return _sub
-                    rules["_speed"]["sub_progress"] = _make_sub()
                 _result = _check_fn()
                 checks.append(_result)
-                gc.collect()
                 if progress_callback is not None:
                     progress_callback(_i, _total, _check_title, _result)
     finally:
@@ -1061,6 +1000,5 @@ def check_pdf_quality(
         pages_checked=pages_checked,
         debug_log=log,
     )
-    _total_elapsed = time.time() - _extract_start
-    _log(log, f"[QUALITY] complete overall={report.overall_status} checks={len(checks)} total_time={_total_elapsed:.2f}s")
+    _log(log, f"[QUALITY] complete overall={report.overall_status} checks={len(checks)}")
     return report
