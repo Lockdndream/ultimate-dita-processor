@@ -27,6 +27,7 @@ brand_rules:
   angi:
     keywords:
       - angi
+      - hydrogen dispenser
 
 required_taglines:
   all:
@@ -48,7 +49,7 @@ ocr:
   language: eng
 
 matching_thresholds:
-  logo_hash_max_distance: 18
+  logo_hash_max_distance: 20
   dark_margin_ratio: 0.55
   watermark_keywords:
     - draft
