@@ -667,17 +667,32 @@ with right:
                     "not_checked": "was skipped.",
                 }
 
-                _ph_header   = st.empty()
-                _ph_rows     = [st.empty() for _ in range(_TOTAL_CHECKS)]
-                _ph_results  = [st.empty() for _ in range(_TOTAL_CHECKS)]
+                _ph_header     = st.empty()
+                _ph_extract    = st.empty()
+                _ph_elapsed    = st.empty()
+                _ph_rows       = [st.empty() for _ in range(_TOTAL_CHECKS)]
+                _ph_results    = [st.empty() for _ in range(_TOTAL_CHECKS)]
+                _run_start     = time.time()
 
-                def _draw_progress(idx, total, title, result):
+                def _draw_progress(idx, total, title, result, detail=""):
+                    _elapsed = time.time() - _run_start
+                    _ph_elapsed.caption(f"⏱️ Elapsed: {_elapsed:.1f}s")
+                    if idx == -1:
+                        # Pre-extraction phase
+                        _ph_extract.markdown(
+                            f"&nbsp;&nbsp;⏳ **Pre-extraction** &nbsp; `{detail}`"
+                        )
+                        return
+                    _ph_extract.markdown(
+                        f"&nbsp;&nbsp;✅ **Pre-extraction complete**"
+                    )
                     _ph_header.markdown(
                         f"**Running quality checks…** &nbsp; `{idx + (1 if result else 0)}/{total}`"
                     )
                     if result is None:
+                        _suffix = f" &nbsp; `{detail}`" if detail else "…"
                         _ph_rows[idx].markdown(
-                            f"&nbsp;&nbsp;⏳ `{idx + 1}/{total}` &nbsp; Checking **{title}**…"
+                            f"&nbsp;&nbsp;⏳ `{idx + 1}/{total}` &nbsp; Checking **{title}**{_suffix}"
                         )
                     else:
                         icon = _STATUS_ICONS.get(result.status, "⏭️")
@@ -726,6 +741,7 @@ with right:
                     f"**Quality check complete** — "
                     f"`{len(report.checks)}` checks · `{flagged}` flagged · `{elapsed:.2f}s`"
                 )
+                _ph_elapsed.caption(f"⏱️ Total time: {elapsed:.1f}s")
 
                 # Render metrics and debug log inline — no session state needed
                 st.divider()
