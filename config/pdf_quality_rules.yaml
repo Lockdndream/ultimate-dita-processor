@@ -1,0 +1,55 @@
+brand_rules:
+  invenco:
+    keywords:
+      - passport
+      - flexpay
+  gilbarco:
+    keywords:
+      - encore
+      - frontier
+      - sprint
+      - konnect
+      - GPU
+      - Global pumping unit
+      - Insite360
+      - adblue
+      - konect
+      - omnia
+      - pump control node
+      - vaportek
+      - PCN5
+  gasboy:
+    keywords:
+      - atlas
+      - islander
+      - fleet solutions
+      - atlasx
+  angi:
+    keywords:
+      - angi
+
+required_taglines:
+  all:
+    - powered by vontier
+
+logo_color_rules:
+  invenco:
+    mode: monochrome
+  gilbarco:
+    mode: monochrome
+  gasboy:
+    mode: monochrome
+  angi:
+    mode: allow_blue
+
+ocr:
+  enabled: true
+  dpi: 200
+  language: eng
+
+matching_thresholds:
+  logo_hash_max_distance: 18
+  dark_margin_ratio: 0.55
+  watermark_keywords:
+    - draft
+    - preliminary

@@ -33,6 +33,7 @@ _crop_widget = _stc.declare_component("crop_widget", path=str(_COMP_DIR))
 from agents.extractor import extract_pdf, extract_docx, ExtractorError  # noqa
 from agents.mapper    import Mapper                                       # noqa
 from agents.generator import Generator                                    # noqa
+from agents.pdf_quality import QualityReport, check_pdf_quality           # noqa
 from agents.validator import Validator                                    # noqa
 from agents.image_processor import (                                      # noqa
     process_image, IMAGE_SCALE_PRESETS, SCALE_PRESET_LABELS,
@@ -147,6 +148,73 @@ def _get_fig_index(blocks: list[dict], target: dict) -> int:
         return fig_blocks.index(target)
     except ValueError:
         return -1
+
+
+_QUALITY_TONES = {
+    "pass": ("#1c2200", "#c8ff00", "#2e4000", "PASS"),
+    "warn": ("#2a2200", "#ffcf4d", "#5a4300", "WARN"),
+    "fail": ("#2a0a00", "#ff6b35", "#4a1a00", "FAIL"),
+    "not_checked": ("#161616", "#b0b0b0", "#333333", "NOT CHECKED"),
+}
+
+
+def _quality_badge(status: str) -> str:
+    bg, fg, border, label = _QUALITY_TONES.get(status, _QUALITY_TONES["not_checked"])
+    return (
+        f'<span style="background:{bg};color:{fg};border:1px solid {border};'
+        f'border-radius:20px;padding:4px 12px;font-size:11px;letter-spacing:0.08em;">'
+        f'● {label}</span>'
+    )
+
+
+def _render_quality_results(report: QualityReport, source_name: str) -> None:
+    st.markdown(_quality_badge(report.overall_status), unsafe_allow_html=True)
+    st.divider()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Pages checked", report.page_count)
+    c2.metric("Checks", len(report.checks))
+    c3.metric(
+        "Flagged",
+        sum(1 for check in report.checks if check.status in {"fail", "warn"}),
+    )
+
+    tabs = st.tabs(["📋 Checks", "🧾 Summary", "🪲 Debug Log"])
+
+    with tabs[0]:
+        for check in report.checks:
+            with st.expander(f"{check.title} · {check.status.upper()}", expanded=(check.status != "pass")):
+                st.markdown(_quality_badge(check.status), unsafe_allow_html=True)
+                st.write(check.summary)
+                if check.findings:
+                    for finding in check.findings:
+                        prefix = f"Page {finding.page}: " if finding.page is not None else ""
+                        body = prefix + finding.message
+                        if finding.evidence:
+                            body += f"\n\nEvidence: {finding.evidence}"
+                        if finding.severity == "error":
+                            st.error(body)
+                        elif finding.severity == "warning":
+                            st.warning(body)
+                        else:
+                            st.info(body)
+                else:
+                    st.success("No page-level findings for this check.")
+
+    with tabs[1]:
+        st.subheader(f"Quality Report · {source_name}")
+        for check in report.checks:
+            st.markdown(f"**{check.title}** — `{check.status}` — {check.summary}")
+
+    with tabs[2]:
+        log_text = "\n".join(report.debug_log) if report.debug_log else "(no log)"
+        st.code(log_text, language="text")
+        st.download_button(
+            "⬇ Download quality log",
+            data=log_text.encode("utf-8"),
+            file_name="pdf_quality_debug.log",
+            mime="text/plain",
+        )
 
 # ---------------------------------------------------------------------------
 # Build media dict — called directly at conversion time with widget values
@@ -381,20 +449,26 @@ with left:
         '<div style="font-size:22px;font-weight:800;color:#fff;margin-bottom:4px;">'
         'DITA 2.0 Converter</div>'
         '<div style="font-size:12px;color:#555;margin-bottom:16px;">'
-        'Upload a PDF or DOCX to convert to DITA 2.0 XML</div>',
+        'Convert to DITA XML or run standalone PDF quality checks</div>',
         unsafe_allow_html=True,
     )
 
     st.markdown(
         '<div style="font-size:10px;color:#c8ff00;letter-spacing:0.12em;'
-        'margin-bottom:8px;font-family:monospace;">v1.5.7 · substep-reverted</div>',
+        'margin-bottom:8px;font-family:monospace;">v1.7.0 · quality-checks</div>',
         unsafe_allow_html=True,
+    )
+
+    app_mode = st.radio(
+        "Mode",
+        options=["Convert to DITA", "Check PDF Quality"],
+        horizontal=True,
     )
 
     # ── File upload ───────────────────────────────────────────────────────────
     uploaded_file = st.file_uploader(
-        "Select a PDF or DOCX file",
-        type=["pdf", "docx"],
+        "Select a PDF or DOCX file" if app_mode == "Convert to DITA" else "Select a PDF file",
+        type=["pdf", "docx"] if app_mode == "Convert to DITA" else ["pdf"],
         help="Text-based (digital) PDFs only. Scanned PDFs are not supported.",
     )
 
@@ -403,12 +477,16 @@ with left:
     st.divider()
 
     # ── Document type ─────────────────────────────────────────────────────────
-    output_type = st.radio(
-        "Document type",
-        options=["Map (Kit documents)", "Bookmap (Book documents)"],
-        horizontal=True,
-    )
-    is_bookmap = output_type == "Bookmap (Book documents)"
+    if app_mode == "Convert to DITA":
+        output_type = st.radio(
+            "Document type",
+            options=["Map (Kit documents)", "Bookmap (Book documents)"],
+            horizontal=True,
+        )
+        is_bookmap = output_type == "Bookmap (Book documents)"
+    else:
+        output_type = "Quality"
+        is_bookmap = False
 
     # ── Page range (PDF only) ─────────────────────────────────────────────────
     page_range = st.text_input(
@@ -421,7 +499,7 @@ with left:
     st.divider()
 
     # ── Image options ─────────────────────────────────────────────────────────
-    if is_pdf:
+    if app_mode == "Convert to DITA" and is_pdf:
         extract_images = st.toggle("Extract images from PDF", value=False)
     else:
         extract_images = False
@@ -466,7 +544,7 @@ with left:
         convert_format       = "keep"
 
     # ── DOCX image folder ─────────────────────────────────────────────────────
-    if not is_pdf and uploaded_file is not None:
+    if app_mode == "Convert to DITA" and not is_pdf and uploaded_file is not None:
         st.divider()
         with st.expander("ℹ️ How to provide DOCX images"):
             st.markdown("""
@@ -486,8 +564,45 @@ with left:
 
     st.divider()
 
+    if app_mode == "Check PDF Quality":
+        st.markdown(
+            '<div style="font-size:11px;color:#888;margin-bottom:6px;">'  
+            'Speed options</div>',
+            unsafe_allow_html=True,
+        )
+        _sc1, _sc2 = st.columns(2)
+        with _sc1:
+            opt_fast_dpi = st.checkbox(
+                "Lower DPI",
+                value=True,
+                help="Renders pages at 100 DPI instead of 200 DPI for watermark and change bar checks. "
+                     "Cuts render time by ~75%. May miss very small watermark text.",
+            )
+            opt_skip_raster = st.checkbox(
+                "Skip raster change bar",
+                value=True,
+                help="Skips the pixel-level margin scan for change bars and relies only on vector drawing "
+                     "detection. Much faster. Safe for most modern digital PDFs.",
+            )
+        with _sc2:
+            opt_early_exit = st.checkbox(
+                "Early exit",
+                value=True,
+                help="Stops scanning remaining pages as soon as the first watermark or change bar is found. "
+                     "Faster when these are present, no difference when absent.",
+            )
+            opt_sample_pages = st.checkbox(
+                "Sample pages",
+                value=False,
+                help="Checks ~5 evenly spaced pages instead of every page for watermark and change bar "
+                     "detection. Significantly faster on large documents. May miss isolated occurrences.",
+            )
+        st.divider()
+    else:
+        opt_fast_dpi = opt_skip_raster = opt_early_exit = opt_sample_pages = False
+
     run_button = st.button(
-        "▶  Convert to DITA 2.0",
+        "▶  Convert to DITA 2.0" if app_mode == "Convert to DITA" else "▶  Check PDF Quality",
         type="primary",
         disabled=uploaded_file is None,
         use_container_width=True,
@@ -518,147 +633,247 @@ with right:
         try:
             t0 = time.time()
             debug_log: list[str] = [
-                f"=== DITA Converter Debug Log ===",
+                f"=== {'DITA Converter' if app_mode == 'Convert to DITA' else 'PDF Quality'} Debug Log ===",
                 f"file: {file_name}  size: {len(file_bytes)} bytes",
+                f"mode: {app_mode}",
                 f"is_pdf: {is_pdf}  extract_images: {extract_images}  page_range: {page_range!r}",
-                f"is_bookmap: {is_bookmap}",
             ]
-
-            _stage(ph_extractor, "EXTRACTOR", "⏳", "Parsing document…")
-            blocks = (
-                extract_pdf(file_bytes, page_range=page_range,
-                            extract_images=extract_images,
-                            debug_log=debug_log)
-                if is_pdf
-                else extract_docx(file_bytes, image_folder=image_folder)
-            )
-            n_imgs = sum(1 for b in blocks if b.get("metadata", {}).get("image_bytes"))
-            debug_log.append(f"[UI] after extract: {len(blocks)} blocks, {n_imgs} with image_bytes")
-            _stage(ph_extractor, "EXTRACTOR", "✅",
-                   f"{len(blocks)} blocks · {n_imgs} image(s) found")
-
-            # Block type breakdown for diagnosis
-            from collections import Counter as _Counter
-            _btype_counts = _Counter(b.get("type") for b in blocks)
-            _meta_kinds   = _Counter(
-                b.get("metadata", {}).get("list_kind")
-                for b in blocks if b.get("type") == "list_item"
-            )
-            debug_log.append(f"[BLOCKS] type breakdown: {dict(_btype_counts)}")
-            debug_log.append(f"[BLOCKS] list_item kinds: {dict(_meta_kinds)}")
-
-            # Sample paragraphs that look like numbered items (digit at start)
-            _numbered_paras = [
-                b.get("text", "")[:80]
-                for b in blocks
-                if b.get("type") == "paragraph"
-                and b.get("text", "")[:4].strip().rstrip(".)").isdigit()
-            ]
-            if _numbered_paras:
+            if app_mode == "Check PDF Quality":
                 debug_log.append(
-                    f"[BLOCKS] paragraphs starting with digit "
-                    f"({len(_numbered_paras)} found — likely undetected steps):"
+                    f"[SPEED] fast_dpi={opt_fast_dpi} skip_raster_change_bar={opt_skip_raster} "
+                    f"early_exit={opt_early_exit} sample_pages={opt_sample_pages}"
                 )
-                for _t in _numbered_paras[:15]:
-                    debug_log.append(f"  → {_t!r}")
-            else:
-                debug_log.append("[BLOCKS] no paragraphs starting with digit found")
+                _QUALITY_CHECK_LABELS = [
+                    "Footer Month/Year Consistency",
+                    "Bookmark Title Matches Footer",
+                    "Brand Logo Check",
+                    "Curly Quotes Check",
+                    "Watermark Check",
+                    "Change Bar Check",
+                    "Even Page Count",
+                    "Blank Page Notice",
+                ]
+                _TOTAL_CHECKS = len(_QUALITY_CHECK_LABELS)
+                _STATUS_ICONS = {
+                    "pass":        "✅",
+                    "fail":        "❌",
+                    "warn":        "⚠️",
+                    "not_checked": "⏭️",
+                }
+                _RESULT_MSGS = {
+                    "pass":        "looks good.",
+                    "fail":        "failed.",
+                    "warn":        "has warnings.",
+                    "not_checked": "was skipped.",
+                }
 
-            # Sample of all list_item blocks
-            _list_items = [b for b in blocks if b.get("type") == "list_item"]
-            if _list_items:
-                debug_log.append(f"[BLOCKS] list_item sample (first 10):")
-                for _b in _list_items[:10]:
-                    _kind = _b.get("metadata", {}).get("list_kind", "?")
-                    debug_log.append(f"  [{_kind}] {_b.get('text','')[:70]!r}")
-            else:
-                debug_log.append("[BLOCKS] no list_item blocks found at all")
+                _ph_header   = st.empty()
+                _ph_rows     = [st.empty() for _ in range(_TOTAL_CHECKS)]
+                _ph_results  = [st.empty() for _ in range(_TOTAL_CHECKS)]
 
-            _stage(ph_mapper, "MAPPER", "⏳", "Applying YAML mapping rules…")
-            blocks = Mapper().map(blocks)
-            _stage(ph_mapper, "MAPPER", "✅", "Topic type detected")
+                def _draw_progress(idx, total, title, result):
+                    _ph_header.markdown(
+                        f"**Running quality checks…** &nbsp; `{idx + (1 if result else 0)}/{total}`"
+                    )
+                    if result is None:
+                        _ph_rows[idx].markdown(
+                            f"&nbsp;&nbsp;⏳ `{idx + 1}/{total}` &nbsp; Checking **{title}**…"
+                        )
+                    else:
+                        icon = _STATUS_ICONS.get(result.status, "⏭️")
+                        msg  = _RESULT_MSGS.get(result.status, "done.")
+                        _ph_rows[idx].markdown(
+                            f"&nbsp;&nbsp;{icon} `{idx + 1}/{total}` &nbsp; "
+                            f"**{title}** — {msg}"
+                        )
+                        with _ph_results[idx].container():
+                            with st.expander(
+                                f"{result.title} · {result.status.upper()}",
+                                expanded=(result.status != "pass"),
+                            ):
+                                st.markdown(_quality_badge(result.status), unsafe_allow_html=True)
+                                st.write(result.summary)
+                                if result.findings:
+                                    for finding in result.findings:
+                                        prefix = f"Page {finding.page}: " if finding.page is not None else ""
+                                        body   = prefix + finding.message
+                                        if finding.evidence:
+                                            body = body + chr(10) + chr(10) + "Evidence: " + finding.evidence
+                                        if finding.severity == "error":
+                                            st.error(body)
+                                        elif finding.severity == "warning":
+                                            st.warning(body)
+                                        else:
+                                            st.info(body)
+                                else:
+                                    st.success("No page-level findings for this check.")
 
-            _stage(ph_generator, "GENERATOR", "⏳", "Building DITA 2.0 XML…")
-
-            # Preserve raw render bytes before any processing
-            # (only on first run — never overwrite the original)
-            if extract_images and n_imgs > 0:
-                for _b in blocks:
-                    if _b.get("type") == "figure":
-                        _m = _b.get("metadata", {})
-                        if _m.get("image_bytes") and "image_bytes_raw" not in _m:
-                            _m["image_bytes_raw"] = _m["image_bytes"]
-
-            # Process images and set image_href on figure blocks
-            media: dict[str, bytes] = {}
-            debug_log.append(f"[UI] before _build_media: extract_images={extract_images} n_imgs={n_imgs}")
-            if extract_images and n_imgs > 0:
-                media = _build_media(
-                    blocks,
-                    crop=apply_border_padding,
-                    padding_px=padding_px,
-                    border_px=border_px,
-                    border_colour=border_colour,
-                    pad_colour=pad_colour,
-                    scale_preset=scale_preset,
-                    convert_format=convert_format,
+                report = check_pdf_quality(
+                    file_bytes,
+                    page_range=page_range,
+                    debug_log=debug_log,
+                    progress_callback=_draw_progress,
+                    fast_dpi=opt_fast_dpi,
+                    skip_raster_change_bar=opt_skip_raster,
+                    early_exit=opt_early_exit,
+                    sample_pages=opt_sample_pages,
                 )
-                debug_log.append(f"[UI] _build_media produced {len(media)} file(s): {list(media.keys())}")
+                elapsed = time.time() - t0
+                flagged = sum(1 for check in report.checks if check.status in {"fail", "warn"})
 
-            gen         = Generator()
-            topic_files = gen.generate(blocks, debug_log=debug_log)
-            map_title   = Path(file_name).stem.replace("_", " ").replace("-", " ").title()
+                _ph_header.markdown(
+                    f'{"✅" if report.overall_status == "pass" else "⚠️"} '
+                    f"**Quality check complete** — "
+                    f"`{len(report.checks)}` checks · `{flagged}` flagged · `{elapsed:.2f}s`"
+                )
 
-            map_str  = (gen.generate_bookmap(topic_files, map_title=map_title)
-                        if is_bookmap else
-                        gen.generate_ditamap(topic_files, map_title=map_title))
-            map_name = Path(file_name).stem + ".ditamap"
+                # Render metrics and debug log inline — no session state needed
+                st.divider()
+                _mc1, _mc2, _mc3 = st.columns(3)
+                _mc1.metric("Pages checked", report.page_count)
+                _mc2.metric("Checks", len(report.checks))
+                _mc3.metric("Flagged", flagged)
+                with st.expander("🪲 Debug Log"):
+                    _log_text = "\n".join(debug_log) if debug_log else "(no log)"
+                    st.code(_log_text, language="text")
+                    st.download_button(
+                        "⬇ Download quality log",
+                        data=_log_text.encode("utf-8"),
+                        file_name="pdf_quality_debug.log",
+                        mime="text/plain",
+                    )
+                st.session_state.results = None
+            else:
+                debug_log.append(f"is_bookmap: {is_bookmap}")
+                _stage(ph_extractor, "EXTRACTOR", "⏳", "Parsing document…")
+                blocks = (
+                    extract_pdf(file_bytes, page_range=page_range,
+                                extract_images=extract_images,
+                                debug_log=debug_log)
+                    if is_pdf
+                    else extract_docx(file_bytes, image_folder=image_folder)
+                )
+                n_imgs = sum(1 for b in blocks if b.get("metadata", {}).get("image_bytes"))
+                debug_log.append(f"[UI] after extract: {len(blocks)} blocks, {n_imgs} with image_bytes")
+                _stage(ph_extractor, "EXTRACTOR", "✅",
+                       f"{len(blocks)} blocks · {n_imgs} image(s) found")
 
-            _stage(ph_generator, "GENERATOR", "✅",
-                   f"{len(topic_files)} topic(s) · {len(media)} media file(s)")
+                from collections import Counter as _Counter
+                _btype_counts = _Counter(b.get("type") for b in blocks)
+                _meta_kinds   = _Counter(
+                    b.get("metadata", {}).get("list_kind")
+                    for b in blocks if b.get("type") == "list_item"
+                )
+                debug_log.append(f"[BLOCKS] type breakdown: {dict(_btype_counts)}")
+                debug_log.append(f"[BLOCKS] list_item kinds: {dict(_meta_kinds)}")
 
-            _stage(ph_validator, "VALIDATOR", "⏳", "Validating XML…")
-            validator = Validator()
-            validation_results = [
-                (fname, xml_str, validator.validate(xml_str, blocks, filename=fname))
-                for fname, xml_str in topic_files
-            ]
-            total_errors   = sum(len(vr.errors)   for _, _, vr in validation_results)
-            total_warnings = sum(len(vr.warnings)  for _, _, vr in validation_results)
-            elapsed = time.time() - t0
-            _stage(ph_validator, "VALIDATOR",
-                   "✅" if total_errors == 0 else "⚠️",
-                   f"{total_errors} errors · {total_warnings} warnings · {elapsed:.2f}s")
+                _numbered_paras = [
+                    b.get("text", "")[:80]
+                    for b in blocks
+                    if b.get("type") == "paragraph"
+                    and b.get("text", "")[:4].strip().rstrip(".)").isdigit()
+                ]
+                if _numbered_paras:
+                    debug_log.append(
+                        f"[BLOCKS] paragraphs starting with digit "
+                        f"({len(_numbered_paras)} found — likely undetected steps):"
+                    )
+                    for _t in _numbered_paras[:15]:
+                        debug_log.append(f"  → {_t!r}")
+                else:
+                    debug_log.append("[BLOCKS] no paragraphs starting with digit found")
 
-            debug_log.append(f"[UI] pipeline complete in {elapsed:.2f}s")
+                _list_items = [b for b in blocks if b.get("type") == "list_item"]
+                if _list_items:
+                    debug_log.append(f"[BLOCKS] list_item sample (first 10):")
+                    for _b in _list_items[:10]:
+                        _kind = _b.get("metadata", {}).get("list_kind", "?")
+                        debug_log.append(f"  [{_kind}] {_b.get('text','')[:70]!r}")
+                else:
+                    debug_log.append("[BLOCKS] no list_item blocks found at all")
 
-            # Write log file
-            _log_path = _ROOT / "dita_converter_debug.log"
-            _log_path.write_text("\n".join(debug_log), encoding="utf-8")
+                _stage(ph_mapper, "MAPPER", "⏳", "Applying YAML mapping rules…")
+                blocks = Mapper().map(blocks)
+                _stage(ph_mapper, "MAPPER", "✅", "Topic type detected")
 
-            st.session_state.results = {
-                "topic_files":     validation_results,
-                "ditamap_str":     map_str,
-                "ditamap_name":    map_name,
-                "n_topics":        len(topic_files),
-                "source_name":     file_name,
-                "map_title":       map_title,
-                "elapsed":         elapsed,
-                "blocks":          blocks,
-                "is_bookmap":      is_bookmap,
-                "media":           media,
-                "debug_log":       debug_log,
-                "extract_images":  extract_images,
-                "img_build_args":  {
-                    "crop":           apply_border_padding,
-                    "padding_px":     padding_px,
-                    "border_px":      border_px,
-                    "border_colour":  border_colour,
-                    "pad_colour":     pad_colour,
-                    "scale_preset":   scale_preset,
-                    "convert_format": convert_format,
-                },
-            }
+                _stage(ph_generator, "GENERATOR", "⏳", "Building DITA 2.0 XML…")
+
+                if extract_images and n_imgs > 0:
+                    for _b in blocks:
+                        if _b.get("type") == "figure":
+                            _m = _b.get("metadata", {})
+                            if _m.get("image_bytes") and "image_bytes_raw" not in _m:
+                                _m["image_bytes_raw"] = _m["image_bytes"]
+
+                media: dict[str, bytes] = {}
+                debug_log.append(f"[UI] before _build_media: extract_images={extract_images} n_imgs={n_imgs}")
+                if extract_images and n_imgs > 0:
+                    media = _build_media(
+                        blocks,
+                        crop=apply_border_padding,
+                        padding_px=padding_px,
+                        border_px=border_px,
+                        border_colour=border_colour,
+                        pad_colour=pad_colour,
+                        scale_preset=scale_preset,
+                        convert_format=convert_format,
+                    )
+                    debug_log.append(f"[UI] _build_media produced {len(media)} file(s): {list(media.keys())}")
+
+                gen         = Generator()
+                topic_files = gen.generate(blocks, debug_log=debug_log)
+                map_title   = Path(file_name).stem.replace("_", " ").replace("-", " ").title()
+
+                map_str  = (gen.generate_bookmap(topic_files, map_title=map_title)
+                            if is_bookmap else
+                            gen.generate_ditamap(topic_files, map_title=map_title))
+                map_name = Path(file_name).stem + ".ditamap"
+
+                _stage(ph_generator, "GENERATOR", "✅",
+                       f"{len(topic_files)} topic(s) · {len(media)} media file(s)")
+
+                _stage(ph_validator, "VALIDATOR", "⏳", "Validating XML…")
+                validator = Validator()
+                validation_results = [
+                    (fname, xml_str, validator.validate(xml_str, blocks, filename=fname))
+                    for fname, xml_str in topic_files
+                ]
+                total_errors   = sum(len(vr.errors)   for _, _, vr in validation_results)
+                total_warnings = sum(len(vr.warnings)  for _, _, vr in validation_results)
+                elapsed = time.time() - t0
+                _stage(ph_validator, "VALIDATOR",
+                       "✅" if total_errors == 0 else "⚠️",
+                       f"{total_errors} errors · {total_warnings} warnings · {elapsed:.2f}s")
+
+                debug_log.append(f"[UI] pipeline complete in {elapsed:.2f}s")
+
+                _log_path = _ROOT / "dita_converter_debug.log"
+                _log_path.write_text("\n".join(debug_log), encoding="utf-8")
+
+                st.session_state.results = {
+                    "kind": "convert",
+                    "topic_files":     validation_results,
+                    "ditamap_str":     map_str,
+                    "ditamap_name":    map_name,
+                    "n_topics":        len(topic_files),
+                    "source_name":     file_name,
+                    "map_title":       map_title,
+                    "elapsed":         elapsed,
+                    "blocks":          blocks,
+                    "is_bookmap":      is_bookmap,
+                    "media":           media,
+                    "debug_log":       debug_log,
+                    "extract_images":  extract_images,
+                    "img_build_args":  {
+                        "crop":           apply_border_padding,
+                        "padding_px":     padding_px,
+                        "border_px":      border_px,
+                        "border_colour":  border_colour,
+                        "pad_colour":     pad_colour,
+                        "scale_preset":   scale_preset,
+                        "convert_format": convert_format,
+                    },
+                }
 
         except ExtractorError as exc:
             debug_log.append(f"[UI] ExtractorError: {exc}")
@@ -676,7 +891,11 @@ with right:
             st.session_state.results = None
 
     # ── Results ───────────────────────────────────────────────────────────────
-    if st.session_state.results:
+    if st.session_state.results and st.session_state.results.get("kind") == "quality":
+        res = st.session_state.results
+        _render_quality_results(res["report"], res["source_name"])
+
+    if st.session_state.results and st.session_state.results.get("kind") != "quality":
         res          = st.session_state.results
         topic_files  = res["topic_files"]
         ditamap_str  = res["ditamap_str"]

@@ -97,8 +97,40 @@ class Mapper:
 
             # ---- Paragraphs ----
             if btype == "paragraph":
-                # UI menucascade
-                if self._ui_pattern.match(text) and ">" in text:
+                # Menucascade: bold navigation path extracted from mixed line.
+                # Look for __BOLD_START__...>...__BOLD_END__ pattern, or
+                # a line where ALL text is a nav path (all words contain >).
+                text_wb = meta.get("text_with_bold", text)
+                bold_nav = re.search(
+                    r"__BOLD_START__(.*?)__BOLD_END__",
+                    text_wb
+                )
+                if bold_nav:
+                    nav_text = bold_nav.group(1).strip()
+                    if ">" in nav_text:
+                        plain_before = text_wb[:text_wb.index("__BOLD_START__")].strip()
+                        plain_before = re.sub(r"__BOLD\w+__", "", plain_before).strip()
+                        if plain_before:
+                            # Keep current block as <p> with plain text
+                            block["text"] = plain_before
+                            block["dita_element"] = "p"
+                            # Insert a new menucascade block after this one
+                            mc_block = {
+                                "type": "paragraph",
+                                "text": nav_text,
+                                "level": 0,
+                                "is_header": False,
+                                "rows": [],
+                                "metadata": {},
+                                "dita_element": "menucascade",
+                            }
+                            blocks.insert(i + 1, mc_block)
+                        else:
+                            block["text"] = nav_text
+                            block["dita_element"] = "menucascade"
+                        continue
+                elif self._ui_pattern.match(text) and ">" in text and " " not in text.replace(" > ", "").strip():
+                    # Fallback: entire line is a nav path with no surrounding text
                     block["dita_element"] = "menucascade"
                     continue
 
